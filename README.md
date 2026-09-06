@@ -1,1 +1,1 @@
-# vps-rustdesk
+# vps
