@@ -27,6 +27,12 @@ if (-not (Test-Path $download)) { throw "RustDesk download failed." }
 New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 Copy-Item -Path $download -Destination $rustdesk -Force
 
+# A portable/installer executable can launch a GUI helper while --install-service runs.
+# Stop those user-session processes before starting the Windows service so the service
+# can acquire its executable/files cleanly on a non-interactive GitHub runner.
+Get-Process -Name "rustdesk" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
 Write-Host "Installing RustDesk service..."
 & $rustdesk --install-service
 $installExit = $LASTEXITCODE
@@ -38,9 +44,31 @@ Start-Sleep -Seconds 8
 $service = Get-Service | Where-Object { $_.Name -like "RustDesk*" -or $_.DisplayName -like "RustDesk*" } | Select-Object -First 1
 if (-not $service) { throw "RustDesk Windows service was not found after installation." }
 
+# Refresh the controller because the service may have been created while the initial
+# Get-Service object was cached.
+$service = Get-Service -Name $service.Name
+Write-Host "RustDesk service detected: $($service.Name) / $($service.Status)"
+
 if ($service.Status -ne "Running") {
-    Start-Service -Name $service.Name -ErrorAction Stop
-    Start-Sleep -Seconds 5
+    $started = $false
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        Write-Host "Starting RustDesk service (attempt $attempt/4)..."
+        try {
+            Start-Service -Name $service.Name -ErrorAction Stop
+        } catch {
+            Write-Host "Start attempt failed: $($_.Exception.Message)"
+        }
+        Start-Sleep -Seconds 5
+        $service = Get-Service -Name $service.Name
+        if ($service.Status -eq "Running") {
+            $started = $true
+            break
+        }
+    }
+    if (-not $started) {
+        $service = Get-Service -Name $service.Name
+        throw "RustDesk service could not be started. Final status: $($service.Status)."
+    }
 }
 
 Write-Host "Setting RustDesk permanent password..."
