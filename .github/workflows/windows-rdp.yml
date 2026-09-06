@@ -9,6 +9,9 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: 0. Checkout repository
+        uses: actions/checkout@v4
+
       - name: 1. Enable Remote Desktop
         shell: powershell
         run: |
@@ -34,32 +37,7 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "NvDAdmin" -ErrorAction SilentlyContinue
           Write-Host "RDP administrator created: NvDAdmin"
 
-      - name: 3. Install and Configure Tailscale
-        shell: powershell
-        env:
-          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTHKEY)) { throw "TAILSCALE_AUTHKEY repository secret is missing." }
-          $installer = "$env:TEMP\tailscale-setup.msi"
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $installer
-          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -NoNewWindow
-          $tailscale = "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tailscale)) { $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe" }
-          if (-not (Test-Path $tailscale)) { throw "Tailscale executable was not found after installation." }
-          & $tailscale up --authkey="$env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server"
-          if ($LASTEXITCODE -ne 0) { throw "Tailscale connection failed." }
-          Start-Sleep -Seconds 5
-          $ip = & $tailscale ip -4
-          if ([string]::IsNullOrWhiteSpace($ip)) { throw "Could not obtain Tailscale IPv4 address." }
-          Write-Host "============================================"
-          Write-Host "Tailscale RDP Server"
-          Write-Host "IP Address : $ip"
-          Write-Host "Username   : NvDAdmin"
-          Write-Host "RDP password is stored in GitHub Secrets."
-          Write-Host "============================================"
-
-      - name: 4. Install and Configure RustDesk
+      - name: 3. Install and Configure RustDesk
         shell: powershell
         env:
           RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD || secrets.RDP_PASSWORD }}
@@ -67,7 +45,7 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_rustdesk.ps1"
           if ($LASTEXITCODE -ne 0) { throw "RustDesk setup failed." }
 
-      - name: 5. Verify Remote Access Services
+      - name: 4. Verify Remote Access Services
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -78,7 +56,7 @@ jobs:
           if ($rustdeskService.Status -ne "Running") { throw "RustDesk service is not running." }
           Write-Host "RustDesk service: $($rustdeskService.Status)"
 
-      - name: 6. Clone YouTube Downloader Bot
+      - name: 5. Clone YouTube Downloader Bot
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -89,7 +67,7 @@ jobs:
           Write-Host "Bot repository cloned."
           Write-Host "Commit: $(git rev-parse --short HEAD)"
 
-      - name: 7. Bootstrap Windows Bot Environment
+      - name: 6. Bootstrap Windows Bot Environment
         shell: powershell
         working-directory: C:\youtube_downloader_bot
         run: |
@@ -97,7 +75,7 @@ jobs:
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_windows.ps1"
           if ($LASTEXITCODE -ne 0) { throw "Windows bootstrap failed." }
 
-      - name: 8. Validate Bot Configuration
+      - name: 7. Validate Bot Configuration
         shell: powershell
         working-directory: C:\youtube_downloader_bot
         env:
@@ -119,7 +97,7 @@ jobs:
           py -3.13 scripts\healthcheck.py
           if ($LASTEXITCODE -ne 0) { throw "Bot health check failed." }
 
-      - name: 9. Start YouTube Downloader Bot
+      - name: 8. Start YouTube Downloader Bot
         shell: powershell
         working-directory: C:\youtube_downloader_bot
         env:
@@ -154,7 +132,7 @@ jobs:
           }
           Write-Host "Bot is running successfully."
 
-      - name: 10. Keep Windows VM Alive
+      - name: 9. Keep Windows VM Alive
         shell: powershell
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -176,7 +154,7 @@ jobs:
           $botPid = [int](Get-Content $pidFile)
           Write-Host "============================================"
           Write-Host "Windows VM is ready"
-          Write-Host "RDP + Tailscale + RustDesk are enabled"
+          Write-Host "RustDesk is enabled (Tailscale is not used)"
           Write-Host "Bot PID: $botPid"
           Write-Host "VM will remain alive for approximately 350 minutes."
           Write-Host "============================================"
@@ -215,7 +193,7 @@ jobs:
               if (-not $restarted) { throw "Bot could not be kept running after 3 restart attempts." }
           }
 
-      - name: 11. Cleanup
+      - name: 10. Cleanup
         if: always()
         shell: powershell
         run: |
