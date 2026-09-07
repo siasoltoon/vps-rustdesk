@@ -37,20 +37,10 @@ jobs:
           Write-Host "RDP Username: NvDAdmin"
           Write-Host "RDP Password: Use the value stored in repository secret RDP_PASSWORD"
           Write-Host "========================================"
-
-          Write-Host "========================================"
-          Write-Host "RDP NETWORK DIAGNOSTICS"
-          Write-Host "--- Network adapters ---"
-          Get-NetIPConfiguration | Format-List InterfaceAlias,InterfaceIndex,IPv4Address,IPv4DefaultGateway,DNSServer
           Write-Host "--- TCP listeners on 3389 ---"
           Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue | Format-Table -AutoSize
-          Write-Host "--- RDP firewall rules ---"
-          Get-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue | Select-Object DisplayName,Enabled,Profile,Direction,Action | Format-Table -AutoSize
           Write-Host "--- Local RDP port test ---"
           Test-NetConnection -ComputerName "127.0.0.1" -Port 3389 | Select-Object ComputerName,RemotePort,TcpTestSucceeded
-          Write-Host "--- Public IP ---"
-          Write-Host $publicIp
-          Write-Host "========================================"
 
       - name: 3. Install and Configure Parsec
         shell: powershell
@@ -63,7 +53,6 @@ jobs:
 
           $parsecDir = "C:\ProgramData\Parsec"
           New-Item -ItemType Directory -Path $parsecDir -Force | Out-Null
-
           @(
             "app_host=1",
             "host_name=GitHub_Windows_VM",
@@ -75,7 +64,6 @@ jobs:
             "network_server_start_port=8000"
           ) | Set-Content -Path "$parsecDir\config.txt" -Encoding ascii
 
-          # Parsec uses UDP for peer-to-peer streaming. Allow its configured host ports.
           New-NetFirewallRule -DisplayName "Parsec Host UDP 8000-8011" -Direction Inbound -Protocol UDP -LocalPort 8000-8011 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
           New-NetFirewallRule -DisplayName "Parsec Host UDP 8000-8011 Outbound" -Direction Outbound -Protocol UDP -LocalPort 8000-8011 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
           New-NetFirewallRule -DisplayName "Parsec STUN UDP 3478 Outbound" -Direction Outbound -Protocol UDP -RemotePort 3478 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
@@ -87,44 +75,66 @@ jobs:
             Start-Service -Name $service.Name -ErrorAction SilentlyContinue
           }
 
-          if (Test-Path "C:\Program Files\Parsec\parsecd.exe") {
-            Start-Process -FilePath "C:\Program Files\Parsec\parsecd.exe" -ArgumentList "--service" -WindowStyle Hidden -ErrorAction SilentlyContinue
+          $parsecCandidates = @(
+            "C:\Program Files\Parsec\parsecd.exe",
+            "C:\Program Files (x86)\Parsec\parsecd.exe"
+          )
+          $parsecd = $parsecCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($parsecd) {
+            Start-Process -FilePath $parsecd -ArgumentList "--service" -WindowStyle Hidden -ErrorAction SilentlyContinue
           }
           Start-Sleep -Seconds 10
 
           Write-Host "========================================"
-          Write-Host "PARSEC NETWORK DIAGNOSTICS"
-          Write-Host "--- DNS ---"
-          Resolve-DnsName parsec.app -ErrorAction SilentlyContinue | Select-Object -First 4 Name,Type,IPAddress
-          Resolve-DnsName stun.parsec.app -ErrorAction SilentlyContinue | Select-Object -First 4 Name,Type,IPAddress
+          Write-Host "PARSEC HOST DIAGNOSTICS"
+          Write-Host "--- Installation paths ---"
+          $parsecCandidates + "$parsecDir\config.txt" | ForEach-Object { Write-Host "$_ -> $(Test-Path $_)" }
+
+          Write-Host "--- Processes ---"
+          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "*parsec*" } | Select-Object Id,ProcessName,Path | Format-Table -AutoSize
+
+          Write-Host "--- Services ---"
+          Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object Name,DisplayName,Status,StartType | Format-Table -AutoSize
+
+          Write-Host "--- Config ---"
+          if (Test-Path "$parsecDir\config.txt") { Get-Content "$parsecDir\config.txt" }
+
+          Write-Host "--- UDP listeners 8000-8011 ---"
+          Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 8000 -and $_.LocalPort -le 8011 } | Select-Object LocalAddress,LocalPort,OwningProcess | Format-Table -AutoSize
+
+          Write-Host "--- UDP listeners owned by Parsec processes ---"
+          $parsecPids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "*parsec*" } | Select-Object -ExpandProperty Id)
+          if ($parsecPids.Count -gt 0) {
+            Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $parsecPids -contains $_.OwningProcess } | Select-Object LocalAddress,LocalPort,OwningProcess | Format-Table -AutoSize
+          } else { Write-Host "No Parsec process PID found." }
+
           Write-Host "--- HTTPS connectivity ---"
           foreach ($url in @("https://kessel-api.parsec.app","https://kessel-ws.parsec.app","https://builds.parsec.app")) {
             try {
               $r = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 15
-              Write-Host "$url -> HTTP $($r.StatusCode)"
+              Write-Host "$url -> HTTP $($r.StatusCode) (reachable)"
             } catch {
-              Write-Host "$url -> FAILED: $($_.Exception.Message)"
+              if ($_.Exception.Response) {
+                $status = [int]$_.Exception.Response.StatusCode
+                Write-Host "$url -> HTTP $status (reachable; application-level response)"
+              } else {
+                Write-Host "$url -> NETWORK FAILED: $($_.Exception.Message)"
+              }
             }
           }
-          Write-Host "--- UDP 3478 test ---"
+
+          Write-Host "--- UDP 3478 ---"
           try {
             $stun = [System.Net.Dns]::GetHostAddresses("stun.parsec.app") | Where-Object AddressFamily -eq "InterNetwork" | Select-Object -First 1
             if ($stun) {
               $udp = New-Object System.Net.Sockets.UdpClient
-              $udp.Client.SendTimeout = 5000
               $bytes = [System.Text.Encoding]::ASCII.GetBytes("parsec-stun-test")
               $sent = $udp.Send($bytes,$bytes.Length,$stun.IPAddressToString,3478)
               $udp.Close()
               Write-Host "UDP packet sent to $($stun.IPAddressToString):3478, bytes=$sent"
             } else { Write-Host "Could not resolve stun.parsec.app IPv4 address." }
           } catch { Write-Host "UDP 3478 test failed: $($_.Exception.Message)" }
-          Write-Host "--- Parsec host UDP listeners ---"
-          Get-NetUDPEndpoint -LocalPort 8000 -ErrorAction SilentlyContinue | Format-Table -AutoSize
-          Write-Host "--- Parsec firewall rules ---"
-          Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object DisplayName -like "Parsec*" | Select-Object DisplayName,Enabled,Profile,Direction,Action | Format-Table -AutoSize
           Write-Host "========================================"
-          Write-Host "Parsec is installed in Per Computer mode."
-          Write-Host "For a personal/free Parsec account, authentication still requires signing in on the VM."
 
       - name: 4. Verify Remote Access Services
         shell: powershell
@@ -138,11 +148,7 @@ jobs:
           Write-Host "RDP service: $($rdp.Status)"
           Write-Host "Parsec service: $($parsec.Name) / $($parsec.Status)"
           Write-Host "Parsec config: PASS"
-          if (Test-Path "C:\ProgramData\Parsec\user.bin") {
-            Write-Host "Parsec authentication state: present"
-          } else {
-            Write-Host "Parsec authentication state: not signed in yet - use RDP and sign in manually."
-          }
+          if (Test-Path "C:\ProgramData\Parsec\user.bin") { Write-Host "Parsec authentication state: present" } else { Write-Host "Parsec authentication state: not signed in yet - use RDP and sign in manually." }
 
       - name: 5. Clone YouTube Downloader Bot
         shell: powershell
@@ -254,6 +260,11 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          $pidFile = "C:\youtube_downloader_bot\bot.pid"
-          if (Test-Path $pidFile) { try { Stop-Process -Id ([int](Get-Content $pidFile)) -Force -ErrorAction SilentlyContinue } catch {} }
-          Write-Host "Cleanup completed."
+          $botPath = "C:\youtube_downloader_bot"
+          if (Test-Path "$botPath\bot.pid") {
+            try {
+              $botPid = [int](Get-Content "$botPath\bot.pid")
+              Stop-Process -Id $botPid -Force -ErrorAction SilentlyContinue
+            } catch { }
+          }
+          Write-Host "Cleanup complete."
