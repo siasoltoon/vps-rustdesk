@@ -74,39 +74,79 @@ jobs:
             Set-Service -Name $service.Name -StartupType Automatic
             Start-Service -Name $service.Name -ErrorAction SilentlyContinue
           }
+          Start-Sleep -Seconds 5
 
+          Write-Host "========================================"
+          Write-Host "PARSEC PROCESS/SERVICE ROOT-CAUSE DIAGNOSTICS"
+          Write-Host "--- Installation paths ---"
           $parsecCandidates = @(
             "C:\Program Files\Parsec\parsecd.exe",
             "C:\Program Files (x86)\Parsec\parsecd.exe"
           )
-          $parsecd = $parsecCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if ($parsecd) {
-            Start-Process -FilePath $parsecd -ArgumentList "--service" -WindowStyle Hidden -ErrorAction SilentlyContinue
-          }
-          Start-Sleep -Seconds 10
-
-          Write-Host "========================================"
-          Write-Host "PARSEC HOST DIAGNOSTICS"
-          Write-Host "--- Installation paths ---"
           $parsecCandidates + "$parsecDir\config.txt" | ForEach-Object { Write-Host "$_ -> $(Test-Path $_)" }
 
-          Write-Host "--- Processes ---"
-          Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "*parsec*" } | Select-Object Id,ProcessName,Path | Format-Table -AutoSize
+          Write-Host "--- Service definition ---"
+          $svc = Get-CimInstance Win32_Service -Filter "Name='Parsec'" -ErrorAction SilentlyContinue
+          if (-not $svc) { $svc = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Parsec*' -or $_.DisplayName -like '*Parsec*' } | Select-Object -First 1 }
+          if ($svc) {
+            Write-Host "Name: $($svc.Name)"
+            Write-Host "DisplayName: $($svc.DisplayName)"
+            Write-Host "State: $($svc.State)"
+            Write-Host "StartMode: $($svc.StartMode)"
+            Write-Host "StartName: $($svc.StartName)"
+            Write-Host "PathName: $($svc.PathName)"
+            Write-Host "ProcessId: $($svc.ProcessId)"
+            Write-Host "ExitCode: $($svc.ExitCode)"
+          } else { Write-Host "Parsec Windows service definition was not found." }
 
-          Write-Host "--- Services ---"
-          Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object Name,DisplayName,Status,StartType | Format-Table -AutoSize
+          Write-Host "--- sc.exe query/qc ---"
+          & sc.exe query Parsec 2>&1
+          & sc.exe qc Parsec 2>&1
 
-          Write-Host "--- Config ---"
-          if (Test-Path "$parsecDir\config.txt") { Get-Content "$parsecDir\config.txt" }
+          Write-Host "--- Current Parsec processes ---"
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*parsec*' } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
+
+          Write-Host "--- Direct parsecd.exe launch ---"
+          $parsecd = $parsecCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($parsecd) {
+            try {
+              Write-Host "Launching: $parsecd --service"
+              $direct = Start-Process -FilePath $parsecd -ArgumentList "--service" -PassThru -WindowStyle Hidden
+              Write-Host "Direct launch PID: $($direct.Id)"
+              Start-Sleep -Seconds 10
+              $direct.Refresh()
+              Write-Host "Direct launch HasExited: $($direct.HasExited)"
+              if ($direct.HasExited) { Write-Host "Direct launch ExitCode: $($direct.ExitCode)" }
+            } catch { Write-Host "Direct launch exception: $($_.Exception.Message)" }
+          } else { Write-Host "parsecd.exe was not found." }
+
+          Write-Host "--- Processes after direct launch ---"
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*parsec*' } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
 
           Write-Host "--- UDP listeners 8000-8011 ---"
           Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 8000 -and $_.LocalPort -le 8011 } | Select-Object LocalAddress,LocalPort,OwningProcess | Format-Table -AutoSize
 
-          Write-Host "--- UDP listeners owned by Parsec processes ---"
-          $parsecPids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "*parsec*" } | Select-Object -ExpandProperty Id)
-          if ($parsecPids.Count -gt 0) {
-            Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $parsecPids -contains $_.OwningProcess } | Select-Object LocalAddress,LocalPort,OwningProcess | Format-Table -AutoSize
-          } else { Write-Host "No Parsec process PID found." }
+          Write-Host "--- Parsec logs ---"
+          $logRoots = @("$env:ProgramData\Parsec", "$env:LOCALAPPDATA\Parsec", "$env:APPDATA\Parsec")
+          foreach ($root in $logRoots) {
+            if (Test-Path $root) {
+              Write-Host "Log root: $root"
+              Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.log','.txt') -or $_.Name -match 'log|parsec' } | Sort-Object LastWriteTime -Descending | Select-Object -First 10 FullName,Length,LastWriteTime | Format-Table -AutoSize
+            }
+          }
+
+          Write-Host "--- Recent Parsec log tails ---"
+          $logFiles = Get-ChildItem -Path $logRoots -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.log','.txt') -and $_.Name -match 'parsec|log' } | Sort-Object LastWriteTime -Descending | Select-Object -First 5
+          foreach ($file in $logFiles) {
+            Write-Host "### $($file.FullName) ###"
+            Get-Content $file.FullName -Tail 80 -ErrorAction SilentlyContinue
+          }
+
+          Write-Host "--- Windows Application errors for Parsec ---"
+          Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.ProviderName -match 'Application Error|Windows Error Reporting' -and $_.Message -match '(?i)parsec|parsecd' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
+
+          Write-Host "--- Windows System errors mentioning Parsec ---"
+          Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match '(?i)parsec|parsecd' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
 
           Write-Host "--- HTTPS connectivity ---"
           foreach ($url in @("https://kessel-api.parsec.app","https://kessel-ws.parsec.app","https://builds.parsec.app")) {
@@ -114,12 +154,7 @@ jobs:
               $r = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 15
               Write-Host "$url -> HTTP $($r.StatusCode) (reachable)"
             } catch {
-              if ($_.Exception.Response) {
-                $status = [int]$_.Exception.Response.StatusCode
-                Write-Host "$url -> HTTP $status (reachable; application-level response)"
-              } else {
-                Write-Host "$url -> NETWORK FAILED: $($_.Exception.Message)"
-              }
+              if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode; Write-Host "$url -> HTTP $status (reachable; application-level response)" } else { Write-Host "$url -> NETWORK FAILED: $($_.Exception.Message)" }
             }
           }
 
@@ -248,23 +283,18 @@ jobs:
                   $restartCount++
                   $python = (& py -3.13 -c "import sys; print(sys.executable)").Trim()
                   $process = Start-Process -FilePath $python -ArgumentList "-u bot.py" -WorkingDirectory $botPath -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-                  $botPid = $process.Id; $botPid | Out-File -FilePath $pidFile -Encoding ascii
-                  Start-Sleep -Seconds 15; $process.Refresh()
-                  if (-not $process.HasExited) { $restarted = $true; Write-Host "Bot restart succeeded. New PID: $botPid" }
-                  else { if (Test-Path $stderr) { Get-Content $stderr -Tail 150 }; Start-Sleep -Seconds 15 }
+                  $botPid = $process.Id
+                  $botPid | Out-File -FilePath $pidFile -Encoding ascii
+                  Start-Sleep -Seconds 10
+                  $process.Refresh()
+                  if (-not $process.HasExited) { $restarted = $true; Write-Host "Bot restarted successfully. PID: $botPid" }
               }
-              if (-not $restarted) { throw "Bot could not be kept running after 3 restart attempts." }
+              if (-not $restarted) { throw "Bot stopped and could not be restarted after 3 attempts." }
           }
 
       - name: 10. Cleanup
         if: always()
         shell: powershell
         run: |
-          $botPath = "C:\youtube_downloader_bot"
-          if (Test-Path "$botPath\bot.pid") {
-            try {
-              $botPid = [int](Get-Content "$botPath\bot.pid")
-              Stop-Process -Id $botPid -Force -ErrorAction SilentlyContinue
-            } catch { }
-          }
-          Write-Host "Cleanup complete."
+          $ErrorActionPreference = "Continue"
+          Write-Host "Workflow cleanup complete."
