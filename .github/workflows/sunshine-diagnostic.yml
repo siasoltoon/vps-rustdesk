@@ -1,4 +1,4 @@
-name: Sunshine Runtime Diagnostics
+name: Sunshine Capability Diagnostic
 
 on:
   workflow_dispatch:
@@ -22,100 +22,137 @@ jobs:
           if ($msi.ExitCode -ne 0 -and $msi.ExitCode -ne 3010) { throw "Sunshine MSI installation failed: $($msi.ExitCode)" }
           $sunshine = "C:\Program Files\Sunshine\sunshine.exe"
           if (-not (Test-Path $sunshine)) { throw "Sunshine executable not found." }
+          Write-Host "Sunshine executable: $sunshine"
           & $sunshine --version
 
-      - name: 2. Diagnose Sunshine Runtime
+      - name: 2. Diagnose Display GPU and Hardware Encoding
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           Write-Host "========================================"
-          Write-Host "SUNSHINE RUNTIME DIAGNOSTICS"
+          Write-Host "DISPLAY / GPU / ENCODER DIAGNOSTICS"
           Write-Host "========================================"
-
-          Write-Host "--- Display adapters ---"
+          Write-Host "--- Video controllers ---"
           Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-            Select-Object Name,DriverVersion,VideoModeDescription,PNPDeviceID |
+            Select-Object Name,DriverVersion,VideoModeDescription,AdapterRAM,PNPDeviceID |
             Format-List
-
-          Write-Host "--- Sunshine service ---"
-          Get-CimInstance Win32_Service -Filter "Name='SunshineService'" -ErrorAction SilentlyContinue |
-            Select-Object Name,State,StartMode,StartName,PathName |
+          Write-Host "--- Desktop monitors ---"
+          Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue |
+            Select-Object Name,ScreenWidth,ScreenHeight,PNPDeviceID |
             Format-List
+          Write-Host "--- Sunshine bundled ffmpeg / hardware encoders ---"
+          $ffmpegCandidates = @(
+            "C:\Program Files\Sunshine\tools\ffmpeg.exe",
+            "C:\Program Files\Sunshine\tools\ffmpeg\bin\ffmpeg.exe",
+            "C:\Program Files\Sunshine\ffmpeg.exe"
+          )
+          $ffmpeg = $ffmpegCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($ffmpeg) {
+            Write-Host "ffmpeg: $ffmpeg"
+            & $ffmpeg -hide_banner -encoders 2>&1 |
+              Select-String -Pattern "h264_(amf|nvenc|qsv)|hevc_(amf|nvenc|qsv)|av1_(amf|nvenc|qsv)" |
+              ForEach-Object { Write-Host $_ }
+          } else {
+            Write-Host "Bundled ffmpeg was not found in expected paths."
+          }
+          Write-Host "--- Relevant graphics processes/drivers ---"
+          Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProcessName -match '(?i)(dwm|sunshine)' } |
+            Select-Object Id,ProcessName,Path |
+            Format-Table -AutoSize
 
-          Write-Host "--- Sunshine processes ---"
-          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -eq "sunshine.exe" -or $_.Name -eq "sunshinesvc.exe" } |
-            Select-Object ProcessId,Name,ExecutablePath,CommandLine |
-            Format-List
-
+      - name: 3. Start Sunshine and Inspect Capture Runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "========================================"
+          Write-Host "SUNSHINE RUNTIME / CAPTURE TEST"
+          Write-Host "========================================"
+          $sunshine = "C:\Program Files\Sunshine\sunshine.exe"
+          Get-Process -Name sunshine -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          $proc = Start-Process -FilePath $sunshine -PassThru -WindowStyle Hidden
+          Write-Host "Started Sunshine PID: $($proc.Id)"
+          Start-Sleep -Seconds 12
+          $proc.Refresh()
+          if ($proc.HasExited) {
+            Write-Host "Sunshine exited. ExitCode=$($proc.ExitCode)"
+            throw "Sunshine did not stay running."
+          }
           Write-Host "--- Sunshine TCP listeners ---"
           Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
             Where-Object { $_.LocalPort -in @(47984,47989,47990,48010) } |
             Select-Object LocalAddress,LocalPort,OwningProcess |
             Sort-Object LocalPort |
             Format-Table -AutoSize
-
-          Write-Host "--- Sunshine UDP endpoints ---"
+          Write-Host "--- Sunshine UDP listeners ---"
           Get-NetUDPEndpoint -ErrorAction SilentlyContinue |
             Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48000 } |
             Select-Object LocalAddress,LocalPort,OwningProcess |
             Sort-Object LocalPort |
             Format-Table -AutoSize
+          Write-Host "--- Local Web UI TCP test ---"
+          $web = Test-NetConnection -ComputerName 127.0.0.1 -Port 47990 -WarningAction SilentlyContinue
+          Write-Host "47990 reachable: $($web.TcpTestSucceeded)"
+          if (-not $web.TcpTestSucceeded) { throw "Sunshine Web UI is not listening on 47990." }
+          Write-Host "--- Sunshine process details ---"
+          Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue |
+            Select-Object ProcessId,ExecutablePath,CommandLine |
+            Format-List
+          Write-Host "--- Sunshine log ---"
+          $log = "C:\Program Files\Sunshine\config\sunshine.log"
+          if (Test-Path $log) { Get-Content $log -ErrorAction SilentlyContinue } else { Write-Host "sunshine.log not found." }
+          Write-Host "--- Sunshine config ---"
+          $conf = "C:\Program Files\Sunshine\config\sunshine.conf"
+          if (Test-Path $conf) {
+            Write-Host "Config size: $((Get-Item $conf).Length) bytes"
+            Get-Content $conf -ErrorAction SilentlyContinue
+          } else { Write-Host "sunshine.conf not found." }
 
+      - name: 4. Test Network Exposure
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "========================================"
+          Write-Host "NETWORK EXPOSURE DIAGNOSTICS"
+          Write-Host "========================================"
+          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
+          Write-Host "Public IP reported by ipify: $publicIp"
+          Write-Host "--- Local IPv4 interfaces ---"
+          Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike "127.*" } |
+            Select-Object InterfaceAlias,IPAddress,PrefixLength,AddressState |
+            Format-Table -AutoSize
+          Write-Host "--- Default routes ---"
+          Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.DestinationPrefix -eq "0.0.0.0/0" } |
+            Select-Object InterfaceAlias,NextHop,RouteMetric |
+            Format-Table -AutoSize
           Write-Host "--- Sunshine firewall rules ---"
           Get-NetFirewallRule -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -like "*Sunshine*" } |
             Select-Object DisplayName,Enabled,Direction,Action,Profile |
             Format-Table -AutoSize
-
-          Write-Host "--- Sunshine config files ---"
-          $roots = @("C:\Program Files\Sunshine\config", "$env:ProgramData\Sunshine", "$env:LOCALAPPDATA\Sunshine")
-          foreach ($root in $roots) {
-            if (Test-Path $root) {
-              Write-Host "Root: $root"
-              Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
-                Select-Object FullName,Length,LastWriteTime |
-                Sort-Object LastWriteTime -Descending |
-                Format-Table -AutoSize
-            }
-          }
-
-          Write-Host "--- sunshine.conf content ---"
-          $conf = "C:\Program Files\Sunshine\config\sunshine.conf"
-          if (Test-Path $conf) {
-            Get-Content $conf -ErrorAction SilentlyContinue
-          } else {
-            Write-Host "sunshine.conf not found."
-          }
-
-          Write-Host "--- sunshine.log content ---"
-          $log = "C:\Program Files\Sunshine\config\sunshine.log"
-          if (Test-Path $log) {
-            Get-Content $log -ErrorAction SilentlyContinue
-          } else {
-            Write-Host "sunshine.log not found."
-          }
-
-          Write-Host "--- Local port tests ---"
-          foreach ($port in @(47984,47989,47990,48010)) {
-            $test = Test-NetConnection -ComputerName 127.0.0.1 -Port $port -WarningAction SilentlyContinue
-            Write-Host "TCP $port -> $($test.TcpTestSucceeded)"
-          }
-
-          Write-Host "--- HTTPS test with curl.exe ---"
-          & curl.exe -k -I --max-time 10 https://127.0.0.1:47990
-          Write-Host "curl exit code: $LASTEXITCODE"
-
-          Write-Host "--- Recent Sunshine application events ---"
-          Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-10)} -ErrorAction SilentlyContinue |
-            Where-Object { $_.Message -match '(?i)sunshine' } |
-            Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message |
-            Format-List
-
+          Write-Host "--- Explicit Sunshine diagnostic firewall rules ---"
+          New-NetFirewallRule -DisplayName "Sunshine Diagnostic TCP 47984-47990" -Direction Inbound -Protocol TCP -LocalPort 47984-47990 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          New-NetFirewallRule -DisplayName "Sunshine Diagnostic TCP 48010" -Direction Inbound -Protocol TCP -LocalPort 48010 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          New-NetFirewallRule -DisplayName "Sunshine Diagnostic UDP 47998-48000" -Direction Inbound -Protocol UDP -LocalPort 47998-48000 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          Write-Host "--- Final Sunshine endpoints ---"
+          Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -in @(47984,47989,47990,48010) } |
+            Select-Object LocalAddress,LocalPort,OwningProcess |
+            Sort-Object LocalPort |
+            Format-Table -AutoSize
+          Get-NetUDPEndpoint -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48000 } |
+            Select-Object LocalAddress,LocalPort,OwningProcess |
+            Sort-Object LocalPort |
+            Format-Table -AutoSize
           Write-Host "========================================"
-
-      - name: 3. Keep Diagnostic Runner Alive
-        shell: powershell
-        run: |
-          Write-Host "Keeping the diagnostic runner alive for 10 minutes."
-          Start-Sleep -Seconds 600
+          Write-Host "INTERPRETATION"
+          Write-Host "1) Hyper-V Video only = cloud VM display adapter is being used, not the physical RX 580."
+          Write-Host "2) No AMF/NVENC/QSV encoder = hardware encoder path is unavailable."
+          Write-Host "3) Capture/encoder errors in sunshine.log = VM graphics/capture limitation."
+          Write-Host "4) Successful capture/encoder startup but unreachable public ports = GitHub runner NAT/inbound networking limitation."
+          Write-Host "5) Empty UDP endpoints before an actual Moonlight session are not by themselves a failure; they are checked as a diagnostic signal."
+          Write-Host "========================================"
