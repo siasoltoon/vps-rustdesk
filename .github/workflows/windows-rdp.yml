@@ -46,6 +46,44 @@ jobs:
           if ($rustdeskService.Status -ne "Running") { throw "RustDesk service is not running." }
           Write-Host "RDP service: $($rdp.Status)"
           Write-Host "RustDesk service: $($rustdeskService.Status)"
+      - name: 4A. RustDesk Network Diagnostics
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $hostName = "rs-ny.rustdesk.com"
+          Write-Host "=== RustDesk Network Diagnostics ==="
+          Write-Host "Hostname: $hostName"
+          try {
+            $dns = Resolve-DnsName $hostName -ErrorAction Stop | Where-Object { $_.Type -eq "A" } | Select-Object -First 1
+            Write-Host "DNS: PASS ($($dns.IPAddress))"
+          } catch { Write-Host "DNS: FAIL ($($_.Exception.Message))" }
+          foreach ($port in @(21116,21117)) {
+            try {
+              $tcp = Test-NetConnection -ComputerName $hostName -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
+              if ($tcp) { Write-Host "TCP $port: PASS" } else { Write-Host "TCP $port: FAIL" }
+            } catch { Write-Host "TCP $port: ERROR ($($_.Exception.Message))" }
+          }
+          Write-Host "UDP 21116: testing with .NET UDP socket..."
+          try {
+            $udp = New-Object System.Net.Sockets.UdpClient
+            $udp.Client.ReceiveTimeout = 3000
+            $bytes = [Text.Encoding]::UTF8.GetBytes("rustdesk-diagnostic")
+            [void]$udp.Send($bytes,$bytes.Length,$hostName,21116)
+            Write-Host "UDP 21116: PACKET_SENT (UDP is connectionless; no reply is required)"
+            $udp.Close()
+          } catch { Write-Host "UDP 21116: ERROR ($($_.Exception.Message))" }
+          $rustdesk = "C:\Program Files\RustDesk\rustdesk.exe"
+          if (Test-Path $rustdesk) {
+            Write-Host "RustDesk executable: PASS"
+            $idFile = "$env:TEMP\rustdesk-diag-id.txt"
+            Remove-Item $idFile -Force -ErrorAction SilentlyContinue
+            Start-Process -FilePath $rustdesk -ArgumentList "--get-id" -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $idFile | Out-Null
+            $id = if (Test-Path $idFile) { (Get-Content $idFile -Raw).Trim() } else { "" }
+            if ($id) { Write-Host "RustDesk ID: $id" } else { Write-Host "RustDesk ID: FAIL" }
+          } else { Write-Host "RustDesk executable: FAIL" }
+          $service = Get-Service | Where-Object { $_.Name -like "RustDesk*" -or $_.DisplayName -like "RustDesk*" } | Select-Object -First 1
+          if ($service) { Write-Host "RustDesk service: $($service.Name) / $($service.Status)" } else { Write-Host "RustDesk service: FAIL" }
+          Write-Host "=== End RustDesk Network Diagnostics ==="
       - name: 5. Clone YouTube Downloader Bot
         shell: powershell
         run: |
