@@ -1,0 +1,121 @@
+name: Sunshine Runtime Diagnostics
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sunshine-diagnostic:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: 1. Install Sunshine
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = "$env:TEMP\Sunshine-Windows-AMD64-installer.msi"
+          $url = "https://github.com/LizardByte/Sunshine/releases/latest/download/Sunshine-Windows-AMD64-installer.msi"
+          Write-Host "--- Downloading Sunshine ---"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          if (-not (Test-Path $installer)) { throw "Sunshine installer download failed." }
+          Write-Host "--- Installing Sunshine ---"
+          $msi = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
+          if ($msi.ExitCode -ne 0 -and $msi.ExitCode -ne 3010) { throw "Sunshine MSI installation failed: $($msi.ExitCode)" }
+          $sunshine = "C:\Program Files\Sunshine\sunshine.exe"
+          if (-not (Test-Path $sunshine)) { throw "Sunshine executable not found." }
+          & $sunshine --version
+
+      - name: 2. Diagnose Sunshine Runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          Write-Host "========================================"
+          Write-Host "SUNSHINE RUNTIME DIAGNOSTICS"
+          Write-Host "========================================"
+
+          Write-Host "--- Display adapters ---"
+          Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+            Select-Object Name,DriverVersion,VideoModeDescription,PNPDeviceID |
+            Format-List
+
+          Write-Host "--- Sunshine service ---"
+          Get-CimInstance Win32_Service -Filter "Name='SunshineService'" -ErrorAction SilentlyContinue |
+            Select-Object Name,State,StartMode,StartName,PathName |
+            Format-List
+
+          Write-Host "--- Sunshine processes ---"
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "sunshine.exe" -or $_.Name -eq "sunshinesvc.exe" } |
+            Select-Object ProcessId,Name,ExecutablePath,CommandLine |
+            Format-List
+
+          Write-Host "--- Sunshine TCP listeners ---"
+          Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -in @(47984,47989,47990,48010) } |
+            Select-Object LocalAddress,LocalPort,OwningProcess |
+            Sort-Object LocalPort |
+            Format-Table -AutoSize
+
+          Write-Host "--- Sunshine UDP endpoints ---"
+          Get-NetUDPEndpoint -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48000 } |
+            Select-Object LocalAddress,LocalPort,OwningProcess |
+            Sort-Object LocalPort |
+            Format-Table -AutoSize
+
+          Write-Host "--- Sunshine firewall rules ---"
+          Get-NetFirewallRule -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*Sunshine*" } |
+            Select-Object DisplayName,Enabled,Direction,Action,Profile |
+            Format-Table -AutoSize
+
+          Write-Host "--- Sunshine config files ---"
+          $roots = @("C:\Program Files\Sunshine\config", "$env:ProgramData\Sunshine", "$env:LOCALAPPDATA\Sunshine")
+          foreach ($root in $roots) {
+            if (Test-Path $root) {
+              Write-Host "Root: $root"
+              Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+                Select-Object FullName,Length,LastWriteTime |
+                Sort-Object LastWriteTime -Descending |
+                Format-Table -AutoSize
+            }
+          }
+
+          Write-Host "--- sunshine.conf content ---"
+          $conf = "C:\Program Files\Sunshine\config\sunshine.conf"
+          if (Test-Path $conf) {
+            Get-Content $conf -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "sunshine.conf not found."
+          }
+
+          Write-Host "--- sunshine.log content ---"
+          $log = "C:\Program Files\Sunshine\config\sunshine.log"
+          if (Test-Path $log) {
+            Get-Content $log -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "sunshine.log not found."
+          }
+
+          Write-Host "--- Local port tests ---"
+          foreach ($port in @(47984,47989,47990,48010)) {
+            $test = Test-NetConnection -ComputerName 127.0.0.1 -Port $port -WarningAction SilentlyContinue
+            Write-Host "TCP $port -> $($test.TcpTestSucceeded)"
+          }
+
+          Write-Host "--- HTTPS test with curl.exe ---"
+          & curl.exe -k -I --max-time 10 https://127.0.0.1:47990
+          Write-Host "curl exit code: $LASTEXITCODE"
+
+          Write-Host "--- Recent Sunshine application events ---"
+          Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-10)} -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match '(?i)sunshine' } |
+            Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message |
+            Format-List
+
+          Write-Host "========================================"
+
+      - name: 3. Keep Diagnostic Runner Alive
+        shell: powershell
+        run: |
+          Write-Host "Keeping the diagnostic runner alive for 10 minutes."
+          Start-Sleep -Seconds 600
