@@ -66,14 +66,13 @@ jobs:
           Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*Parsec*" } | Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
           Write-Host "--- Removing Parsec installation ---"
-          $uninstallEntries = @(
-            Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue,
-            Get-ItemProperty "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue
-          ) | Where-Object { $_.DisplayName -like "*Parsec*" }
+          $uninstallEntries = @()
+          $uninstallEntries += @(Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue)
+          $uninstallEntries += @(Get-ItemProperty "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue)
+          $uninstallEntries = $uninstallEntries | Where-Object { $_.DisplayName -like "*Parsec*" }
           foreach ($entry in $uninstallEntries) {
             if ($entry.UninstallString) {
               Write-Host "Found Parsec uninstall entry: $($entry.DisplayName)"
-              Write-Host "Uninstall string: $($entry.UninstallString)"
               try {
                 $cmd = $entry.UninstallString
                 if ($cmd -match 'msiexec') {
@@ -81,7 +80,9 @@ jobs:
                 } else {
                   Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$cmd`" /S /quiet /norestart" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
                 }
-              } catch { Write-Host "Parsec uninstall attempt failed: $($_.Exception.Message)" }
+              } catch {
+                Write-Host "Parsec uninstall attempt failed: $($_.Exception.Message)"
+              }
             }
           }
           Remove-Item "C:\Program Files\Parsec" -Recurse -Force -ErrorAction SilentlyContinue
@@ -90,7 +91,8 @@ jobs:
 
           Write-Host "--- Downloading official Sunshine Windows AMD64 installer ---"
           $installer = "$env:TEMP\Sunshine-Windows-AMD64-installer.msi"
-          Invoke-WebRequest -Uri "https://github.com/LizardByte/Sunshine/releases/latest/download/Sunshine-Windows-AMD64-installer.msi" -OutFile $installer
+          $sunshineUrl = "https://github.com/LizardByte/Sunshine/releases/latest/download/Sunshine-Windows-AMD64-installer.msi"
+          Invoke-WebRequest -Uri $sunshineUrl -OutFile $installer
           if (-not (Test-Path $installer)) { throw "Sunshine installer download failed." }
 
           Write-Host "--- Installing Sunshine ---"
@@ -166,7 +168,6 @@ jobs:
 
           Write-Host "--- Windows Application errors for Sunshine ---"
           Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match '(?i)sunshine' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
-
           Write-Host "========================================"
 
       - name: 4. Verify Remote Access And Sunshine
@@ -259,26 +260,23 @@ jobs:
 
       - name: 9. Keep Windows VM Alive
         shell: powershell
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          FILONE_ACCESS_KEY: ${{ secrets.FILONE_ACCESS_KEY }}
-          FILONE_SECRET_KEY: ${{ secrets.FILONE_SECRET_KEY }}
-          FILONE_BUCKET: ${{ secrets.FILONE_BUCKET }}
-          FILONE_ENDPOINT: ${{ secrets.FILONE_ENDPOINT }}
-          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-          YOUTUBE_POT_PROVIDER_URL: ${{ secrets.YOUTUBE_POT_PROVIDER_URL }}
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
+          $pidFile = "C:\youtube_downloader_bot\bot.pid"
           for ($minute = 0; $minute -lt 350; $minute += 5) {
             Start-Sleep -Seconds 300
-            $bot = Get-Process -Id (Get-Content "C:\youtube_downloader_bot\bot.pid" -ErrorAction SilentlyContinue) -ErrorAction SilentlyContinue
-            $sunshine = Get-Process -Name "sunshine" -ErrorAction SilentlyContinue
-            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] VM alive. Bot=$([bool]$bot) Sunshine=$([bool]$sunshine)"
-            if (-not $bot) {
-              Write-Host "Bot process is no longer running. Recent bot logs:"
-              if (Test-Path "C:\youtube_downloader_bot\bot-error.log") { Get-Content "C:\youtube_downloader_bot\bot-error.log" -Tail 100 }
-              if (Test-Path "C:\youtube_downloader_bot\bot.log") { Get-Content "C:\youtube_downloader_bot\bot.log" -Tail 100 }
-              throw "YouTube Downloader Bot process stopped."
+            if (Test-Path $pidFile) {
+              $botPid = Get-Content $pidFile -ErrorAction SilentlyContinue
+              if ($botPid) {
+                $botProcess = Get-Process -Id ([int]$botPid) -ErrorAction SilentlyContinue
+                if (-not $botProcess) {
+                  Write-Host "Bot process is no longer running."
+                  if (Test-Path "C:\youtube_downloader_bot\bot-error.log") { Get-Content "C:\youtube_downloader_bot\bot-error.log" -Tail 100 }
+                  if (Test-Path "C:\youtube_downloader_bot\bot.log") { Get-Content "C:\youtube_downloader_bot\bot.log" -Tail 100 }
+                  break
+                }
+                Write-Host "[$minute min] Bot PID $botPid is still running."
+              }
             }
           }
 
