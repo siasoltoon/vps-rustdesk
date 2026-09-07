@@ -32,31 +32,39 @@ jobs:
 
       - name: 3. Install and Configure Parsec
         shell: powershell
-        env:
-          PARSEC_USER_BIN_B64: ${{ secrets.PARSEC_USER_BIN_B64 }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:PARSEC_USER_BIN_B64)) { throw "PARSEC_USER_BIN_B64 repository secret is missing. Create it from the authenticated Parsec user.bin on your laptop." }
           $installer = "$env:TEMP\parsec-windows.exe"
           Invoke-WebRequest -Uri "https://builds.parsec.app/package/parsec-windows.exe" -OutFile $installer
           $proc = Start-Process -FilePath $installer -ArgumentList "/silent /percomputer /vdd /norun" -Wait -PassThru
           if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "Parsec installer failed with exit code $($proc.ExitCode)." }
+
           $parsecDir = "C:\ProgramData\Parsec"
           New-Item -ItemType Directory -Path $parsecDir -Force | Out-Null
-          $userBin = [Convert]::FromBase64String($env:PARSEC_USER_BIN_B64)
-          [IO.File]::WriteAllBytes("$parsecDir\user.bin", $userBin)
           @(
             "app_host=1",
             "host_name=GitHub_Windows_VM",
             "server_max_clients=1",
-            "encoder_bitrate=15",
+            "encoder_bitrate=3",
+            "encoder_fps=30",
+            "server_resolution_x=1280",
+            "server_resolution_y=720",
             "network_server_start_port=8000"
           ) | Set-Content -Path "$parsecDir\config.txt" -Encoding ascii
+
           $service = Get-Service -Name "Parsec" -ErrorAction SilentlyContinue
           if (-not $service) { $service = Get-Service | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object -First 1 }
-          if ($service) { Set-Service -Name $service.Name -StartupType Automatic; Start-Service -Name $service.Name -ErrorAction SilentlyContinue }
-          Start-Process -FilePath "C:\Program Files\Parsec\parsecd.exe" -ArgumentList "--service" -WindowStyle Hidden -ErrorAction SilentlyContinue
+          if ($service) {
+            Set-Service -Name $service.Name -StartupType Automatic
+            Start-Service -Name $service.Name -ErrorAction SilentlyContinue
+          }
+
+          if (Test-Path "C:\Program Files\Parsec\parsecd.exe") {
+            Start-Process -FilePath "C:\Program Files\Parsec\parsecd.exe" -ArgumentList "--service" -WindowStyle Hidden -ErrorAction SilentlyContinue
+          }
           Start-Sleep -Seconds 10
+          Write-Host "Parsec is installed in Per Computer mode."
+          Write-Host "For a personal/free Parsec account, connect by RDP and sign in to Parsec manually on this VM."
 
       - name: 4. Verify Remote Access Services
         shell: powershell
@@ -66,12 +74,15 @@ jobs:
           if ($rdp.Status -ne "Running") { throw "RDP service is not running." }
           $parsec = Get-Service | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object -First 1
           if (-not $parsec) { throw "Parsec service is missing." }
+          if (-not (Test-Path "C:\ProgramData\Parsec\config.txt")) { throw "Parsec config was not installed." }
           Write-Host "RDP service: $($rdp.Status)"
           Write-Host "Parsec service: $($parsec.Name) / $($parsec.Status)"
-          if (-not (Test-Path "C:\ProgramData\Parsec\user.bin")) { throw "Parsec authentication file was not installed." }
-          if (-not (Test-Path "C:\ProgramData\Parsec\config.txt")) { throw "Parsec config was not installed." }
-          Write-Host "Parsec authentication file: PASS"
           Write-Host "Parsec config: PASS"
+          if (Test-Path "C:\ProgramData\Parsec\user.bin") {
+            Write-Host "Parsec authentication state: present"
+          } else {
+            Write-Host "Parsec authentication state: not signed in yet - use RDP and sign in manually."
+          }
 
       - name: 5. Clone YouTube Downloader Bot
         shell: powershell
@@ -159,7 +170,7 @@ jobs:
           if (-not (Test-Path $pidFile)) { throw "Bot PID file was not found." }
           $botPid = [int](Get-Content $pidFile)
           Write-Host "Windows VM is ready"
-          Write-Host "Parsec is enabled"
+          Write-Host "Parsec is installed; sign in manually through RDP if this is a fresh VM."
           for ($minute = 0; $minute -lt 350; $minute += 5) {
               Start-Sleep -Seconds 300
               $process = Get-Process -Id $botPid -ErrorAction SilentlyContinue
