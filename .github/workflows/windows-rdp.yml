@@ -1,4 +1,4 @@
-name: Windows Cloud RDP + Parsec + YouTube Bot
+name: Windows Cloud RDP + Sunshine + YouTube Bot
 
 on:
   workflow_dispatch:
@@ -27,7 +27,11 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($password)) { throw "RDP_PASSWORD repository secret is missing." }
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
           $existingUser = Get-LocalUser -Name "NvDAdmin" -ErrorAction SilentlyContinue
-          if (-not $existingUser) { New-LocalUser -Name "NvDAdmin" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -Description "Temporary GitHub Actions RDP administrator" } else { Set-LocalUser -Name "NvDAdmin" -Password $securePassword }
+          if (-not $existingUser) {
+            New-LocalUser -Name "NvDAdmin" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -Description "Temporary GitHub Actions RDP administrator"
+          } else {
+            Set-LocalUser -Name "NvDAdmin" -Password $securePassword
+          }
           Add-LocalGroupMember -Group "Administrators" -Member "NvDAdmin" -ErrorAction SilentlyContinue
           $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
           Write-Host "========================================"
@@ -42,133 +46,144 @@ jobs:
           Write-Host "--- Local RDP port test ---"
           Test-NetConnection -ComputerName "127.0.0.1" -Port 3389 | Select-Object ComputerName,RemotePort,TcpTestSucceeded
 
-      - name: 3. Install and Configure Parsec
+      - name: 3. Remove Parsec and Install Sunshine
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $installer = "$env:TEMP\parsec-windows.exe"
-          Invoke-WebRequest -Uri "https://builds.parsec.app/package/parsec-windows.exe" -OutFile $installer
-          $proc = Start-Process -FilePath $installer -ArgumentList "/silent /percomputer /vdd /norun" -Wait -PassThru
-          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "Parsec installer failed with exit code $($proc.ExitCode)." }
-
-          $parsecDir = "C:\ProgramData\Parsec"
-          New-Item -ItemType Directory -Path $parsecDir -Force | Out-Null
-          @(
-            "app_host=1",
-            "host_name=GitHub_Windows_VM",
-            "server_max_clients=1",
-            "encoder_bitrate=3",
-            "encoder_fps=30",
-            "server_resolution_x=1280",
-            "server_resolution_y=720",
-            "network_server_start_port=8000"
-          ) | Set-Content -Path "$parsecDir\config.txt" -Encoding ascii
-
-          New-NetFirewallRule -DisplayName "Parsec Host UDP 8000-8011" -Direction Inbound -Protocol UDP -LocalPort 8000-8011 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
-          New-NetFirewallRule -DisplayName "Parsec Host UDP 8000-8011 Outbound" -Direction Outbound -Protocol UDP -LocalPort 8000-8011 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
-          New-NetFirewallRule -DisplayName "Parsec STUN UDP 3478 Outbound" -Direction Outbound -Protocol UDP -RemotePort 3478 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
-
-          $service = Get-Service -Name "Parsec" -ErrorAction SilentlyContinue
-          if ($service) {
-            Stop-Service -Name $service.Name -Force -ErrorAction SilentlyContinue
-            Set-Service -Name $service.Name -StartupType Disabled -ErrorAction SilentlyContinue
-          }
-          Start-Sleep -Seconds 3
-
           Write-Host "========================================"
-          Write-Host "PARSEC INTERACTIVE SESSION TEST"
-          Write-Host "The Parsec Windows service is intentionally stopped for this test."
-          Write-Host "--- Installation paths ---"
-          $parsecCandidates = @(
-            "C:\Program Files\Parsec\parsecd.exe",
-            "C:\Program Files (x86)\Parsec\parsecd.exe"
+          Write-Host "REMOVE PARSEC + INSTALL SUNSHINE"
+          Write-Host "========================================"
+
+          Write-Host "--- Removing any Parsec services/processes ---"
+          Get-Process -Name "parsec","parsecd","pservice" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          $parsecServices = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" }
+          foreach ($svc in $parsecServices) {
+            Stop-Service -Name $svc.Name -Force -ErrorAction SilentlyContinue
+            & sc.exe delete $svc.Name | Out-Host
+          }
+
+          Write-Host "--- Removing Parsec firewall rules ---"
+          Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*Parsec*" } | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+
+          Write-Host "--- Removing Parsec installation ---"
+          $uninstallEntries = @(
+            Get-ItemProperty "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue,
+            Get-ItemProperty "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue
+          ) | Where-Object { $_.DisplayName -like "*Parsec*" }
+          foreach ($entry in $uninstallEntries) {
+            if ($entry.UninstallString) {
+              Write-Host "Found Parsec uninstall entry: $($entry.DisplayName)"
+              Write-Host "Uninstall string: $($entry.UninstallString)"
+              try {
+                $cmd = $entry.UninstallString
+                if ($cmd -match 'msiexec') {
+                  Start-Process -FilePath "msiexec.exe" -ArgumentList "/x $($entry.PSChildName) /qn /norestart" -Wait -PassThru | Out-Null
+                } else {
+                  Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$cmd`" /S /quiet /norestart" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+                }
+              } catch { Write-Host "Parsec uninstall attempt failed: $($_.Exception.Message)" }
+            }
+          }
+          Remove-Item "C:\Program Files\Parsec" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "C:\Program Files (x86)\Parsec" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "C:\ProgramData\Parsec" -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "--- Downloading official Sunshine Windows AMD64 installer ---"
+          $installer = "$env:TEMP\Sunshine-Windows-AMD64-installer.msi"
+          Invoke-WebRequest -Uri "https://github.com/LizardByte/Sunshine/releases/latest/download/Sunshine-Windows-AMD64-installer.msi" -OutFile $installer
+          if (-not (Test-Path $installer)) { throw "Sunshine installer download failed." }
+
+          Write-Host "--- Installing Sunshine ---"
+          $msi = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installer`" /qn /norestart" -Wait -PassThru
+          if ($msi.ExitCode -ne 0 -and $msi.ExitCode -ne 3010) { throw "Sunshine MSI installation failed with exit code $($msi.ExitCode)." }
+
+          $sunshineCandidates = @(
+            "C:\Program Files\Sunshine\sunshine.exe",
+            "C:\Program Files (x86)\Sunshine\sunshine.exe"
           )
-          $parsecCandidates + "$parsecDir\config.txt" | ForEach-Object { Write-Host "$_ -> $(Test-Path $_)" }
+          $sunshine = $sunshineCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $sunshine) { throw "Sunshine executable was not found after installation." }
 
-          Write-Host "--- Service state after stop ---"
-          Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object Name,DisplayName,Status,StartType | Format-Table -AutoSize
+          Write-Host "Sunshine executable: $sunshine"
+          & $sunshine --version
 
-          Write-Host "--- Current Parsec processes ---"
-          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*parsec*' } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
+          Write-Host "--- Sunshine Windows services ---"
+          Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Sunshine*" -or $_.DisplayName -like "*Sunshine*" } | Select-Object Name,DisplayName,Status,StartType | Format-Table -AutoSize
 
-          Write-Host "--- Direct interactive parsecd.exe launch ---"
-          $parsecd = $parsecCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if ($parsecd) {
-            try {
-              Write-Host "Launching in current Actions session: $parsecd"
-              $direct = Start-Process -FilePath $parsecd -PassThru -WindowStyle Hidden
-              Write-Host "Interactive launch PID: $($direct.Id)"
-              Start-Sleep -Seconds 15
-              $direct.Refresh()
-              Write-Host "Interactive launch HasExited: $($direct.HasExited)"
-              if ($direct.HasExited) { Write-Host "Interactive launch ExitCode: $($direct.ExitCode)" }
-            } catch { Write-Host "Interactive launch exception: $($_.Exception.Message)" }
-          } else { Write-Host "parsecd.exe was not found." }
+          Write-Host "--- Sunshine firewall rules ---"
+          Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*Sunshine*" } | Select-Object DisplayName,Enabled,Direction,Action | Format-Table -AutoSize
 
-          Write-Host "--- Processes after interactive launch ---"
-          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*parsec*' } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
+          Write-Host "--- Adding explicit Sunshine streaming firewall rules ---"
+          New-NetFirewallRule -DisplayName "Sunshine TCP 47984-47990" -Direction Inbound -Protocol TCP -LocalPort 47984-47990 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          New-NetFirewallRule -DisplayName "Sunshine TCP 48010" -Direction Inbound -Protocol TCP -LocalPort 48010 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          New-NetFirewallRule -DisplayName "Sunshine UDP 47998-48000" -Direction Inbound -Protocol UDP -LocalPort 47998-48000 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
 
-          Write-Host "--- UDP listeners 8000-8011 ---"
-          Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 8000 -and $_.LocalPort -le 8011 } | Select-Object LocalAddress,LocalPort,OwningProcess | Format-Table -AutoSize
+          Write-Host "========================================"
+          Write-Host "SUNSHINE DIRECT SESSION TEST"
+          Write-Host "========================================"
+          Write-Host "--- Display adapters ---"
+          Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object Name,DriverVersion,VideoModeDescription | Format-Table -AutoSize
 
-          Write-Host "--- Parsec logs ---"
-          $logRoots = @("$env:ProgramData\Parsec", "$env:LOCALAPPDATA\Parsec", "$env:APPDATA\Parsec")
-          foreach ($root in $logRoots) {
-            if (Test-Path $root) {
-              Write-Host "Log root: $root"
-              Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.log','.txt') -or $_.Name -match 'log|parsec' } | Sort-Object LastWriteTime -Descending | Select-Object -First 10 FullName,Length,LastWriteTime | Format-Table -AutoSize
-            }
+          Write-Host "--- Existing Sunshine processes ---"
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*sunshine*" } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
+
+          Write-Host "--- Starting Sunshine directly in the Actions session ---"
+          $sunshineProcess = Start-Process -FilePath $sunshine -PassThru -WindowStyle Hidden
+          Write-Host "Sunshine PID: $($sunshineProcess.Id)"
+          Start-Sleep -Seconds 15
+          $sunshineProcess.Refresh()
+          Write-Host "Sunshine HasExited: $($sunshineProcess.HasExited)"
+          if ($sunshineProcess.HasExited) {
+            Write-Host "Sunshine ExitCode: $($sunshineProcess.ExitCode)"
           }
 
-          Write-Host "--- Recent Parsec log tails ---"
-          $logFiles = Get-ChildItem -Path $logRoots -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.log','.txt') -and $_.Name -match 'parsec|log' } | Sort-Object LastWriteTime -Descending | Select-Object -First 5
-          foreach ($file in $logFiles) {
-            Write-Host "### $($file.FullName) ###"
-            Get-Content $file.FullName -Tail 80 -ErrorAction SilentlyContinue
-          }
+          Write-Host "--- Sunshine processes after launch ---"
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*sunshine*" } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
 
-          Write-Host "--- Windows Application errors for Parsec ---"
-          Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.ProviderName -match 'Application Error|Windows Error Reporting' -and $_.Message -match '(?i)parsec|parsecd' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
+          Write-Host "--- Sunshine TCP listeners ---"
+          Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47984 -and $_.LocalPort -le 48010 } | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize
 
-          Write-Host "--- Windows System errors mentioning Parsec ---"
-          Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match '(?i)parsec|parsecd' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
+          Write-Host "--- Sunshine UDP listeners ---"
+          Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48002 } | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize
 
-          Write-Host "--- HTTPS connectivity ---"
-          foreach ($url in @("https://kessel-api.parsec.app","https://kessel-ws.parsec.app","https://builds.parsec.app")) {
-            try {
-              $r = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 15
-              Write-Host "$url -> HTTP $($r.StatusCode) (reachable)"
-            } catch {
-              if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode; Write-Host "$url -> HTTP $status (reachable; application-level response)" } else { Write-Host "$url -> NETWORK FAILED: $($_.Exception.Message)" }
-            }
-          }
-
-          Write-Host "--- UDP 3478 ---"
+          Write-Host "--- Local Sunshine Web UI test ---"
+          Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 | Select-Object ComputerName,RemotePort,TcpTestSucceeded
           try {
-            $stun = [System.Net.Dns]::GetHostAddresses("stun.parsec.app") | Where-Object AddressFamily -eq "InterNetwork" | Select-Object -First 1
-            if ($stun) {
-              $udp = New-Object System.Net.Sockets.UdpClient
-              $bytes = [System.Text.Encoding]::ASCII.GetBytes("parsec-stun-test")
-              $sent = $udp.Send($bytes,$bytes.Length,$stun.IPAddressToString,3478)
-              $udp.Close()
-              Write-Host "UDP packet sent to $($stun.IPAddressToString):3478, bytes=$sent"
-            } else { Write-Host "Could not resolve stun.parsec.app IPv4 address." }
-          } catch { Write-Host "UDP 3478 test failed: $($_.Exception.Message)" }
+            $web = Invoke-WebRequest -Uri "https://127.0.0.1:47990" -SkipCertificateCheck -UseBasicParsing -TimeoutSec 10
+            Write-Host "Sunshine Web UI -> HTTP $($web.StatusCode)"
+          } catch {
+            Write-Host "Sunshine Web UI request: $($_.Exception.Message)"
+          }
+
+          Write-Host "--- Sunshine logs/config files ---"
+          $sunshineRoots = @("C:\Program Files\Sunshine\config", "$env:ProgramData\Sunshine", "$env:LOCALAPPDATA\Sunshine")
+          foreach ($root in $sunshineRoots) {
+            if (Test-Path $root) {
+              Write-Host "Root: $root"
+              Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 15 FullName,Length,LastWriteTime | Format-Table -AutoSize
+            }
+          }
+
+          Write-Host "--- Windows Application errors for Sunshine ---"
+          Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match '(?i)sunshine' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
+
           Write-Host "========================================"
 
-      - name: 4. Verify Remote Access Services
+      - name: 4. Verify Remote Access And Sunshine
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $rdp = Get-Service -Name TermService -ErrorAction Stop
           if ($rdp.Status -ne "Running") { throw "RDP service is not running." }
-          $parsec = Get-Service | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object -First 1
-          if (-not $parsec) { throw "Parsec service is missing." }
-          if (-not (Test-Path "C:\ProgramData\Parsec\config.txt")) { throw "Parsec config was not installed." }
+          $sunshineProcess = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "sunshine.exe" } | Select-Object -First 1
           Write-Host "RDP service: $($rdp.Status)"
-          Write-Host "Parsec service: $($parsec.Name) / $($parsec.Status)"
-          Write-Host "Parsec config: PASS"
-          if (Test-Path "C:\ProgramData\Parsec\user.bin") { Write-Host "Parsec authentication state: present" } else { Write-Host "Parsec authentication state: not signed in yet - use RDP and sign in manually." }
+          if ($sunshineProcess) {
+            Write-Host "Sunshine process: RUNNING (PID $($sunshineProcess.ProcessId))"
+          } else {
+            Write-Host "Sunshine process: NOT RUNNING"
+          }
+          Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 | Select-Object ComputerName,RemotePort,TcpTestSucceeded
+          Write-Host "Parsec is not part of this workflow."
 
       - name: 5. Clone YouTube Downloader Bot
         shell: powershell
@@ -203,7 +218,10 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $required = @("BOT_TOKEN","FILONE_ACCESS_KEY","FILONE_SECRET_KEY","FILONE_BUCKET","FILONE_ENDPOINT")
-          foreach ($name in $required) { $value = [Environment]::GetEnvironmentVariable($name); if ([string]::IsNullOrWhiteSpace($value)) { throw "Required bot environment variable is missing: $name" } }
+          foreach ($name in $required) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value)) { throw "Required bot environment variable is missing: $name" }
+          }
           py -3.13 scripts\healthcheck.py
           if ($LASTEXITCODE -ne 0) { throw "Bot health check failed." }
 
@@ -232,7 +250,11 @@ jobs:
           $process.Id | Out-File -FilePath $pidFile -Encoding ascii
           Start-Sleep -Seconds 10
           $process.Refresh()
-          if ($process.HasExited) { if (Test-Path $stderr) { Get-Content $stderr -Tail 100 }; if (Test-Path $stdout) { Get-Content $stdout -Tail 100 }; throw "YouTube Downloader Bot stopped during startup." }
+          if ($process.HasExited) {
+            if (Test-Path $stderr) { Get-Content $stderr -Tail 100 }
+            if (Test-Path $stdout) { Get-Content $stdout -Tail 100 }
+            throw "YouTube Downloader Bot stopped during startup."
+          }
           Write-Host "Bot is running successfully. PID: $($process.Id)"
 
       - name: 9. Keep Windows VM Alive
@@ -243,38 +265,21 @@ jobs:
           FILONE_SECRET_KEY: ${{ secrets.FILONE_SECRET_KEY }}
           FILONE_BUCKET: ${{ secrets.FILONE_BUCKET }}
           FILONE_ENDPOINT: ${{ secrets.FILONE_ENDPOINT }}
-          FILONE_URL_EXPIRES: ${{ secrets.FILONE_URL_EXPIRES }}
-          TELEGRAM_DIRECT_VIDEO_LIMIT_MB: ${{ secrets.TELEGRAM_DIRECT_VIDEO_LIMIT_MB }}
           YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
           YOUTUBE_POT_PROVIDER_URL: ${{ secrets.YOUTUBE_POT_PROVIDER_URL }}
         run: |
           $ErrorActionPreference = "Stop"
-          $botPath = "C:\youtube_downloader_bot"
-          $pidFile = "$botPath\bot.pid"
-          $stdout = "$botPath\bot.log"
-          $stderr = "$botPath\bot-error.log"
-          if (-not (Test-Path $pidFile)) { throw "Bot PID file was not found." }
-          $botPid = [int](Get-Content $pidFile)
-          Write-Host "Windows VM is ready"
-          Write-Host "Parsec is installed; sign in manually through RDP if this is a fresh VM."
           for ($minute = 0; $minute -lt 350; $minute += 5) {
-              Start-Sleep -Seconds 300
-              $process = Get-Process -Id $botPid -ErrorAction SilentlyContinue
-              if ($process) { Write-Host "[$minute minutes] VM alive | Bot PID $botPid running"; continue }
-              if (Test-Path $stderr) { Get-Content $stderr -Tail 150 }
-              if (Test-Path $stdout) { Get-Content $stdout -Tail 150 }
-              $restartCount = 0; $restarted = $false
-              while ($restartCount -lt 3 -and -not $restarted) {
-                  $restartCount++
-                  $python = (& py -3.13 -c "import sys; print(sys.executable)").Trim()
-                  $process = Start-Process -FilePath $python -ArgumentList "-u bot.py" -WorkingDirectory $botPath -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-                  $botPid = $process.Id
-                  $botPid | Out-File -FilePath $pidFile -Encoding ascii
-                  Start-Sleep -Seconds 10
-                  $process.Refresh()
-                  if (-not $process.HasExited) { $restarted = $true; Write-Host "Bot restarted successfully. PID: $botPid" }
-              }
-              if (-not $restarted) { throw "Bot stopped and could not be restarted after 3 attempts." }
+            Start-Sleep -Seconds 300
+            $bot = Get-Process -Id (Get-Content "C:\youtube_downloader_bot\bot.pid" -ErrorAction SilentlyContinue) -ErrorAction SilentlyContinue
+            $sunshine = Get-Process -Name "sunshine" -ErrorAction SilentlyContinue
+            Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] VM alive. Bot=$([bool]$bot) Sunshine=$([bool]$sunshine)"
+            if (-not $bot) {
+              Write-Host "Bot process is no longer running. Recent bot logs:"
+              if (Test-Path "C:\youtube_downloader_bot\bot-error.log") { Get-Content "C:\youtube_downloader_bot\bot-error.log" -Tail 100 }
+              if (Test-Path "C:\youtube_downloader_bot\bot.log") { Get-Content "C:\youtube_downloader_bot\bot.log" -Tail 100 }
+              throw "YouTube Downloader Bot process stopped."
+            }
           }
 
       - name: 10. Cleanup
@@ -282,4 +287,11 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
-          Write-Host "Workflow cleanup complete."
+          $pidFile = "C:\youtube_downloader_bot\bot.pid"
+          if (Test-Path $pidFile) {
+            $botPid = Get-Content $pidFile -ErrorAction SilentlyContinue
+            if ($botPid) { Stop-Process -Id ([int]$botPid) -Force -ErrorAction SilentlyContinue }
+          }
+          Get-Process -Name "sunshine" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process -Name "parsec","parsecd","pservice" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleanup complete."
