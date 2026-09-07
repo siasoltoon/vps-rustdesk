@@ -82,7 +82,7 @@ jobs:
             $proc.Refresh()
             if ($proc.HasExited) {
               $sunshineExitCode = $proc.ExitCode
-              $hexExit = ('0x{0:X8}' -f ([uint32]$sunshineExitCode))
+              $hexExit = ('0x{0:X8}' -f ([BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$sunshineExitCode),0)))
               Write-Host "Sunshine exited during startup. ExitCode=$sunshineExitCode ($hexExit)"
               Write-Host "RUNTIME RESULT: FAIL - Sunshine process did not remain running."
             } else {
@@ -135,7 +135,7 @@ jobs:
             Format-List
 
           if ($sunshineExitCode -ne $null) {
-            $hexExit = ('0x{0:X8}' -f ([uint32]$sunshineExitCode))
+            $hexExit = ('0x{0:X8}' -f ([BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$sunshineExitCode),0)))
             Write-Host "DIAGNOSTIC NOTE: Sunshine startup crash was recorded as $hexExit; this expected diagnostic failure will NOT fail the job."
           }
 
@@ -146,8 +146,12 @@ jobs:
           Write-Host "========================================"
           Write-Host "NETWORK EXPOSURE DIAGNOSTICS"
           Write-Host "========================================"
-          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
-          Write-Host "Public IP reported by ipify: $publicIp"
+          try {
+            $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
+            Write-Host "Public IP reported by ipify: $publicIp"
+          } catch {
+            Write-Host "Public IP lookup failed: $($_.Exception.Message)"
+          }
           Write-Host "--- Local IPv4 interfaces ---"
           Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Where-Object { $_.IPAddress -notlike "127.*" } |
@@ -183,7 +187,7 @@ jobs:
           Write-Host "========================================"
           Write-Host "- Hyper-V Video only means the cloud VM display adapter is being used, not the physical RX 580."
           Write-Host "- Missing AMF/NVENC/QSV encoders means the physical hardware encoder path is unavailable."
-          Write-Host "- Sunshine startup crash is now recorded without aborting this diagnostic job."
+          Write-Host "- Sunshine startup crash is recorded without aborting this diagnostic job."
           Write-Host "- If Sunshine remains running but public ports are unreachable, that indicates GitHub runner NAT/inbound networking limitations."
           Write-Host "- Empty UDP endpoints before an actual Moonlight session are not by themselves proof of failure."
           Write-Host "- This workflow intentionally separates graphics/runtime failure from network exposure failure."
