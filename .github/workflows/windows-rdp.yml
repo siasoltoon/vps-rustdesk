@@ -121,26 +121,45 @@ jobs:
           New-NetFirewallRule -DisplayName "Sunshine UDP 47998-48000" -Direction Inbound -Protocol UDP -LocalPort 47998-48000 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
 
           Write-Host "========================================"
-          Write-Host "SUNSHINE DIRECT SESSION TEST"
+          Write-Host "SUNSHINE SERVICE / SESSION TEST"
           Write-Host "========================================"
           Write-Host "--- Display adapters ---"
           Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Select-Object Name,DriverVersion,VideoModeDescription | Format-Table -AutoSize
 
           Write-Host "--- Existing Sunshine processes ---"
-          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*sunshine*" } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
+          $existingSunshine = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "sunshine.exe" }
+          $existingSunshine | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
 
-          Write-Host "--- Starting Sunshine directly in the Actions session ---"
-          $sunshineProcess = Start-Process -FilePath $sunshine -PassThru -WindowStyle Hidden
-          Write-Host "Sunshine PID: $($sunshineProcess.Id)"
-          Start-Sleep -Seconds 15
-          $sunshineProcess.Refresh()
-          Write-Host "Sunshine HasExited: $($sunshineProcess.HasExited)"
-          if ($sunshineProcess.HasExited) {
-            Write-Host "Sunshine ExitCode: $($sunshineProcess.ExitCode)"
+          Write-Host "--- Sunshine service status ---"
+          $sunshineService = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "SunshineService" -or $_.DisplayName -eq "Sunshine Service" } | Select-Object -First 1
+          if ($sunshineService) {
+            Write-Host "Sunshine service: $($sunshineService.Status) / $($sunshineService.StartType)"
+            if ($sunshineService.Status -ne "Running") {
+              Start-Service -Name $sunshineService.Name -ErrorAction Stop
+              Start-Sleep -Seconds 5
+              $sunshineService.Refresh()
+              Write-Host "Sunshine service after start: $($sunshineService.Status)"
+            }
+          } else {
+            Write-Host "Sunshine service was not found; checking standalone process."
           }
 
-          Write-Host "--- Sunshine processes after launch ---"
-          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*sunshine*" } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
+          Write-Host "--- Verifying Sunshine process without launching a duplicate instance ---"
+          Start-Sleep -Seconds 5
+          $sunshineProcess = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "sunshine.exe" } | Select-Object -First 1
+          if ($sunshineProcess) {
+            Write-Host "Sunshine process is running (PID $($sunshineProcess.ProcessId))."
+          } else {
+            Write-Host "Sunshine process is not running; attempting one standalone launch."
+            $sunshineProcessHandle = Start-Process -FilePath $sunshine -PassThru -WindowStyle Hidden
+            Start-Sleep -Seconds 15
+            $sunshineProcessHandle.Refresh()
+            if ($sunshineProcessHandle.HasExited) {
+              Write-Host "Standalone Sunshine ExitCode: $($sunshineProcessHandle.ExitCode)"
+              throw "Sunshine failed to remain running and no Sunshine service process was available."
+            }
+            Write-Host "Standalone Sunshine process is running (PID $($sunshineProcessHandle.Id))."
+          }
 
           Write-Host "--- Sunshine TCP listeners ---"
           Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47984 -and $_.LocalPort -le 48010 } | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize
@@ -149,12 +168,19 @@ jobs:
           Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48002 } | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize
 
           Write-Host "--- Local Sunshine Web UI test ---"
-          Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 | Select-Object ComputerName,RemotePort,TcpTestSucceeded
+          $webPort = Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 -WarningAction SilentlyContinue
+          $webPort | Select-Object ComputerName,RemotePort,TcpTestSucceeded
+          if (-not $webPort.TcpTestSucceeded) { throw "Sunshine Web UI TCP port 47990 is not listening." }
+
           try {
-            $web = Invoke-WebRequest -Uri "https://127.0.0.1:47990" -SkipCertificateCheck -UseBasicParsing -TimeoutSec 10
+            $previousCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            $web = Invoke-WebRequest -Uri "https://127.0.0.1:47990" -UseBasicParsing -TimeoutSec 10
             Write-Host "Sunshine Web UI -> HTTP $($web.StatusCode)"
           } catch {
-            Write-Host "Sunshine Web UI request: $($_.Exception.Message)"
+            Write-Host "Sunshine Web UI HTTP request: $($_.Exception.Message)"
+          } finally {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCallback
           }
 
           Write-Host "--- Sunshine logs/config files ---"
@@ -166,7 +192,7 @@ jobs:
             }
           }
 
-          Write-Host "--- Windows Application errors for Sunshine ---"
+          Write-Host "--- Recent Sunshine application errors ---"
           Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match '(?i)sunshine' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
           Write-Host "========================================"
 
@@ -181,9 +207,11 @@ jobs:
           if ($sunshineProcess) {
             Write-Host "Sunshine process: RUNNING (PID $($sunshineProcess.ProcessId))"
           } else {
-            Write-Host "Sunshine process: NOT RUNNING"
+            throw "Sunshine process is not running."
           }
-          Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 | Select-Object ComputerName,RemotePort,TcpTestSucceeded
+          $webPort = Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 -WarningAction SilentlyContinue
+          $webPort | Select-Object ComputerName,RemotePort,TcpTestSucceeded
+          if (-not $webPort.TcpTestSucceeded) { throw "Sunshine Web UI port 47990 is not reachable locally." }
           Write-Host "Parsec is not part of this workflow."
 
       - name: 5. Clone YouTube Downloader Bot
