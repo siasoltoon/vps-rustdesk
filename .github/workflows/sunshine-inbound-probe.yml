@@ -1,0 +1,59 @@
+name: Sunshine Inbound Network Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inbound-probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: 1. Start temporary TCP listener
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $port = 47990
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $port)
+          $listener.Start()
+          $global:listener = $listener
+          Write-Host "========================================"
+          Write-Host "SUNSHINE INBOUND CONNECTIVITY PROBE"
+          Write-Host "========================================"
+          try {
+            $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json" -TimeoutSec 10).ip
+            Write-Host "Public IP reported by ipify: $publicIp"
+          } catch {
+            Write-Host "Public IP lookup failed: $($_.Exception.Message)"
+          }
+          Write-Host "Temporary TCP listener: 0.0.0.0:$port"
+          Write-Host "Firewall rule: allowing TCP $port inbound"
+          New-NetFirewallRule -DisplayName "Sunshine Inbound Probe TCP $port" -Direction Inbound -Protocol TCP -LocalPort $port -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          Write-Host "Listener started successfully."
+          Write-Host ""
+          Write-Host "From your laptop, while this workflow is running, test:"
+          Write-Host "Test-NetConnection <PUBLIC-IP> -Port $port"
+          Write-Host ""
+          Write-Host "IMPORTANT: the public IP above is the runner's egress/public address reported by ipify."
+          Write-Host "A successful connection proves inbound reachability to the runner; a failure is consistent with GitHub-hosted runner NAT blocking inbound connections."
+          Write-Host "Waiting up to 180 seconds for an external TCP connection..."
+          $deadline = (Get-Date).AddSeconds(180)
+          $accepted = $false
+          while ((Get-Date) -lt $deadline) {
+            if ($listener.Pending()) {
+              $client = $listener.AcceptTcpClient()
+              $remote = $client.Client.RemoteEndPoint.ToString()
+              Write-Host ""
+              Write-Host "INBOUND RESULT: PASS - external TCP connection accepted from $remote"
+              $accepted = $true
+              $client.Close()
+              break
+            }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $accepted) {
+            Write-Host ""
+            Write-Host "INBOUND RESULT: NO CONNECTION OBSERVED"
+            Write-Host "This does not prove every GitHub endpoint is blocked, but it strongly indicates that unsolicited inbound TCP is not reaching this runner."
+          }
+          $listener.Stop()
+          Write-Host "Probe listener stopped."
