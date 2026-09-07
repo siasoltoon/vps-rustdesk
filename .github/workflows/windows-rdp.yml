@@ -29,6 +29,14 @@ jobs:
           $existingUser = Get-LocalUser -Name "NvDAdmin" -ErrorAction SilentlyContinue
           if (-not $existingUser) { New-LocalUser -Name "NvDAdmin" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -Description "Temporary GitHub Actions RDP administrator" } else { Set-LocalUser -Name "NvDAdmin" -Password $securePassword }
           Add-LocalGroupMember -Group "Administrators" -Member "NvDAdmin" -ErrorAction SilentlyContinue
+          $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org?format=json").ip
+          Write-Host "========================================"
+          Write-Host "RDP CONNECTION DETAILS"
+          Write-Host "RDP Host/IP : $publicIp"
+          Write-Host "RDP Port    : 3389"
+          Write-Host "RDP Username: NvDAdmin"
+          Write-Host "RDP Password: Use the value stored in repository secret RDP_PASSWORD"
+          Write-Host "========================================"
 
       - name: 3. Install and Configure Parsec
         shell: powershell
