@@ -161,26 +161,39 @@ jobs:
             Write-Host "Standalone Sunshine process is running (PID $($sunshineProcessHandle.Id))."
           }
 
+          Write-Host "--- Sunshine service configuration ---"
+          Get-CimInstance Win32_Service -Filter "Name='SunshineService'" -ErrorAction SilentlyContinue | Select-Object Name,State,StartMode,StartName,PathName | Format-List
+
+          Write-Host "--- Sunshine process details ---"
+          Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue | Select-Object ProcessId,ExecutablePath,CommandLine | Format-List
+
           Write-Host "--- Sunshine TCP listeners ---"
           Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47984 -and $_.LocalPort -le 48010 } | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize
 
           Write-Host "--- Sunshine UDP listeners ---"
           Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -ge 47998 -and $_.LocalPort -le 48002 } | Select-Object LocalAddress,LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize
 
-          Write-Host "--- Local Sunshine Web UI test ---"
+          Write-Host "--- Local Sunshine Web UI TCP test ---"
           $webPort = Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 -WarningAction SilentlyContinue
           $webPort | Select-Object ComputerName,RemotePort,TcpTestSucceeded
           if (-not $webPort.TcpTestSucceeded) { throw "Sunshine Web UI TCP port 47990 is not listening." }
 
+          Write-Host "--- Local Sunshine Web UI HTTPS test via curl ---"
           try {
-            $previousCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-            $web = Invoke-WebRequest -Uri "https://127.0.0.1:47990" -UseBasicParsing -TimeoutSec 10
-            Write-Host "Sunshine Web UI -> HTTP $($web.StatusCode)"
+            $curlOutput = & curl.exe -k -I --max-time 10 "https://127.0.0.1:47990" 2>&1
+            $curlExit = $LASTEXITCODE
+            Write-Host "curl exit code: $curlExit"
+            $curlOutput | Select-Object -First 20 | ForEach-Object { Write-Host $_ }
           } catch {
-            Write-Host "Sunshine Web UI HTTP request: $($_.Exception.Message)"
-          } finally {
-            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCallback
+            Write-Host "Sunshine curl HTTPS request: $($_.Exception.Message)"
+          }
+
+          Write-Host "--- Sunshine runtime log ---"
+          $logPath = "C:\Program Files\Sunshine\config\sunshine.log"
+          if (Test-Path $logPath) {
+            Get-Content $logPath -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "Sunshine runtime log not found at $logPath"
           }
 
           Write-Host "--- Sunshine logs/config files ---"
