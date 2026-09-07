@@ -69,15 +69,15 @@ jobs:
           New-NetFirewallRule -DisplayName "Parsec STUN UDP 3478 Outbound" -Direction Outbound -Protocol UDP -RemotePort 3478 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
 
           $service = Get-Service -Name "Parsec" -ErrorAction SilentlyContinue
-          if (-not $service) { $service = Get-Service | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object -First 1 }
           if ($service) {
-            Set-Service -Name $service.Name -StartupType Automatic
-            Start-Service -Name $service.Name -ErrorAction SilentlyContinue
+            Stop-Service -Name $service.Name -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $service.Name -StartupType Disabled -ErrorAction SilentlyContinue
           }
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 3
 
           Write-Host "========================================"
-          Write-Host "PARSEC PROCESS/SERVICE ROOT-CAUSE DIAGNOSTICS"
+          Write-Host "PARSEC INTERACTIVE SESSION TEST"
+          Write-Host "The Parsec Windows service is intentionally stopped for this test."
           Write-Host "--- Installation paths ---"
           $parsecCandidates = @(
             "C:\Program Files\Parsec\parsecd.exe",
@@ -85,42 +85,27 @@ jobs:
           )
           $parsecCandidates + "$parsecDir\config.txt" | ForEach-Object { Write-Host "$_ -> $(Test-Path $_)" }
 
-          Write-Host "--- Service definition ---"
-          $svc = Get-CimInstance Win32_Service -Filter "Name='Parsec'" -ErrorAction SilentlyContinue
-          if (-not $svc) { $svc = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Parsec*' -or $_.DisplayName -like '*Parsec*' } | Select-Object -First 1 }
-          if ($svc) {
-            Write-Host "Name: $($svc.Name)"
-            Write-Host "DisplayName: $($svc.DisplayName)"
-            Write-Host "State: $($svc.State)"
-            Write-Host "StartMode: $($svc.StartMode)"
-            Write-Host "StartName: $($svc.StartName)"
-            Write-Host "PathName: $($svc.PathName)"
-            Write-Host "ProcessId: $($svc.ProcessId)"
-            Write-Host "ExitCode: $($svc.ExitCode)"
-          } else { Write-Host "Parsec Windows service definition was not found." }
-
-          Write-Host "--- sc.exe query/qc ---"
-          & sc.exe query Parsec 2>&1
-          & sc.exe qc Parsec 2>&1
+          Write-Host "--- Service state after stop ---"
+          Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object Name,DisplayName,Status,StartType | Format-Table -AutoSize
 
           Write-Host "--- Current Parsec processes ---"
           Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*parsec*' } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
 
-          Write-Host "--- Direct parsecd.exe launch ---"
+          Write-Host "--- Direct interactive parsecd.exe launch ---"
           $parsecd = $parsecCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($parsecd) {
             try {
-              Write-Host "Launching: $parsecd --service"
-              $direct = Start-Process -FilePath $parsecd -ArgumentList "--service" -PassThru -WindowStyle Hidden
-              Write-Host "Direct launch PID: $($direct.Id)"
-              Start-Sleep -Seconds 10
+              Write-Host "Launching in current Actions session: $parsecd"
+              $direct = Start-Process -FilePath $parsecd -PassThru -WindowStyle Hidden
+              Write-Host "Interactive launch PID: $($direct.Id)"
+              Start-Sleep -Seconds 15
               $direct.Refresh()
-              Write-Host "Direct launch HasExited: $($direct.HasExited)"
-              if ($direct.HasExited) { Write-Host "Direct launch ExitCode: $($direct.ExitCode)" }
-            } catch { Write-Host "Direct launch exception: $($_.Exception.Message)" }
+              Write-Host "Interactive launch HasExited: $($direct.HasExited)"
+              if ($direct.HasExited) { Write-Host "Interactive launch ExitCode: $($direct.ExitCode)" }
+            } catch { Write-Host "Interactive launch exception: $($_.Exception.Message)" }
           } else { Write-Host "parsecd.exe was not found." }
 
-          Write-Host "--- Processes after direct launch ---"
+          Write-Host "--- Processes after interactive launch ---"
           Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*parsec*' } | Select-Object ProcessId,Name,ExecutablePath,CommandLine | Format-List
 
           Write-Host "--- UDP listeners 8000-8011 ---"
