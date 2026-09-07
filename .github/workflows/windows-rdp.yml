@@ -175,18 +175,23 @@ jobs:
 
           Write-Host "--- Local Sunshine Web UI TCP test ---"
           $webPort = Test-NetConnection -ComputerName "127.0.0.1" -Port 47990 -WarningAction SilentlyContinue
-          $webPort | Select-Object ComputerName,RemotePort,TcpTestSucceeded
+          Write-Host "47990 TCP reachable: $($webPort.TcpTestSucceeded)"
           if (-not $webPort.TcpTestSucceeded) { throw "Sunshine Web UI TCP port 47990 is not listening." }
 
           Write-Host "--- Local Sunshine Web UI HTTPS test via curl ---"
+          $curlLog = "$env:TEMP\sunshine-curl-test.txt"
+          Remove-Item $curlLog -Force -ErrorAction SilentlyContinue
+          $curlExit = 0
           try {
-            $curlOutput = & curl.exe -k -I --max-time 10 "https://127.0.0.1:47990" 2>&1
+            & curl.exe -k -I --max-time 10 "https://127.0.0.1:47990" *> $curlLog
             $curlExit = $LASTEXITCODE
-            Write-Host "curl exit code: $curlExit"
-            $curlOutput | Select-Object -First 20 | ForEach-Object { Write-Host $_ }
           } catch {
-            Write-Host "Sunshine curl HTTPS request: $($_.Exception.Message)"
+            $curlExit = 1
+            "PowerShell curl invocation error: $($_.Exception.Message)" | Set-Content $curlLog
           }
+          Write-Host "curl exit code: $curlExit"
+          if (Test-Path $curlLog) { Get-Content $curlLog -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host $_ } }
+          Write-Host "Note: curl HTTPS failure is diagnostic only; TCP 47990 is the required local service check here."
 
           Write-Host "--- Sunshine runtime log ---"
           $logPath = "C:\Program Files\Sunshine\config\sunshine.log"
@@ -208,6 +213,8 @@ jobs:
           Write-Host "--- Recent Sunshine application errors ---"
           Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match '(?i)sunshine' } | Select-Object TimeCreated,ProviderName,Id,LevelDisplayName,Message | Format-List
           Write-Host "========================================"
+          Write-Host "Sunshine diagnostics completed."
+          exit 0
 
       - name: 4. Verify Remote Access And Sunshine
         shell: powershell
