@@ -63,6 +63,7 @@ jobs:
 
           $parsecDir = "C:\ProgramData\Parsec"
           New-Item -ItemType Directory -Path $parsecDir -Force | Out-Null
+
           @(
             "app_host=1",
             "host_name=GitHub_Windows_VM",
@@ -73,6 +74,11 @@ jobs:
             "server_resolution_y=720",
             "network_server_start_port=8000"
           ) | Set-Content -Path "$parsecDir\config.txt" -Encoding ascii
+
+          # Parsec uses UDP for peer-to-peer streaming. Allow its configured host ports.
+          New-NetFirewallRule -DisplayName "Parsec Host UDP 8000-8011" -Direction Inbound -Protocol UDP -LocalPort 8000-8011 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          New-NetFirewallRule -DisplayName "Parsec Host UDP 8000-8011 Outbound" -Direction Outbound -Protocol UDP -LocalPort 8000-8011 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+          New-NetFirewallRule -DisplayName "Parsec STUN UDP 3478 Outbound" -Direction Outbound -Protocol UDP -RemotePort 3478 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
 
           $service = Get-Service -Name "Parsec" -ErrorAction SilentlyContinue
           if (-not $service) { $service = Get-Service | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object -First 1 }
@@ -85,8 +91,40 @@ jobs:
             Start-Process -FilePath "C:\Program Files\Parsec\parsecd.exe" -ArgumentList "--service" -WindowStyle Hidden -ErrorAction SilentlyContinue
           }
           Start-Sleep -Seconds 10
+
+          Write-Host "========================================"
+          Write-Host "PARSEC NETWORK DIAGNOSTICS"
+          Write-Host "--- DNS ---"
+          Resolve-DnsName parsec.app -ErrorAction SilentlyContinue | Select-Object -First 4 Name,Type,IPAddress
+          Resolve-DnsName stun.parsec.app -ErrorAction SilentlyContinue | Select-Object -First 4 Name,Type,IPAddress
+          Write-Host "--- HTTPS connectivity ---"
+          foreach ($url in @("https://kessel-api.parsec.app","https://kessel-ws.parsec.app","https://builds.parsec.app")) {
+            try {
+              $r = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 15
+              Write-Host "$url -> HTTP $($r.StatusCode)"
+            } catch {
+              Write-Host "$url -> FAILED: $($_.Exception.Message)"
+            }
+          }
+          Write-Host "--- UDP 3478 test ---"
+          try {
+            $stun = [System.Net.Dns]::GetHostAddresses("stun.parsec.app") | Where-Object AddressFamily -eq "InterNetwork" | Select-Object -First 1
+            if ($stun) {
+              $udp = New-Object System.Net.Sockets.UdpClient
+              $udp.Client.SendTimeout = 5000
+              $bytes = [System.Text.Encoding]::ASCII.GetBytes("parsec-stun-test")
+              $sent = $udp.Send($bytes,$bytes.Length,$stun.IPAddressToString,3478)
+              $udp.Close()
+              Write-Host "UDP packet sent to $($stun.IPAddressToString):3478, bytes=$sent"
+            } else { Write-Host "Could not resolve stun.parsec.app IPv4 address." }
+          } catch { Write-Host "UDP 3478 test failed: $($_.Exception.Message)" }
+          Write-Host "--- Parsec host UDP listeners ---"
+          Get-NetUDPEndpoint -LocalPort 8000 -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          Write-Host "--- Parsec firewall rules ---"
+          Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object DisplayName -like "Parsec*" | Select-Object DisplayName,Enabled,Profile,Direction,Action | Format-Table -AutoSize
+          Write-Host "========================================"
           Write-Host "Parsec is installed in Per Computer mode."
-          Write-Host "For a personal/free Parsec account, connect by RDP and sign in to Parsec manually on this VM."
+          Write-Host "For a personal/free Parsec account, authentication still requires signing in on the VM."
 
       - name: 4. Verify Remote Access Services
         shell: powershell
