@@ -1,4 +1,4 @@
-name: Windows Cloud RDP + RustDesk + YouTube Bot
+name: Windows Cloud RDP + Parsec + YouTube Bot
 
 on:
   workflow_dispatch:
@@ -10,6 +10,7 @@ jobs:
     steps:
       - name: 0. Checkout repository
         uses: actions/checkout@v4
+
       - name: 1. Enable Remote Desktop
         shell: powershell
         run: |
@@ -17,6 +18,7 @@ jobs:
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0
+
       - name: 2. Create Temporary RDP Administrator
         shell: powershell
         run: |
@@ -27,63 +29,50 @@ jobs:
           $existingUser = Get-LocalUser -Name "NvDAdmin" -ErrorAction SilentlyContinue
           if (-not $existingUser) { New-LocalUser -Name "NvDAdmin" -Password $securePassword -PasswordNeverExpires -AccountNeverExpires -Description "Temporary GitHub Actions RDP administrator" } else { Set-LocalUser -Name "NvDAdmin" -Password $securePassword }
           Add-LocalGroupMember -Group "Administrators" -Member "NvDAdmin" -ErrorAction SilentlyContinue
-      - name: 3. Install and Configure RustDesk
+
+      - name: 3. Install and Configure Parsec
         shell: powershell
         env:
-          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD || secrets.RDP_PASSWORD }}
+          PARSEC_USER_BIN_B64: ${{ secrets.PARSEC_USER_BIN_B64 }}
         run: |
           $ErrorActionPreference = "Stop"
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_rustdesk_msi_final.ps1"
-          if ($LASTEXITCODE -ne 0) { throw "RustDesk setup failed." }
+          if ([string]::IsNullOrWhiteSpace($env:PARSEC_USER_BIN_B64)) { throw "PARSEC_USER_BIN_B64 repository secret is missing. Create it from the authenticated Parsec user.bin on your laptop." }
+          $installer = "$env:TEMP\parsec-windows.exe"
+          Invoke-WebRequest -Uri "https://builds.parsec.app/package/parsec-windows.exe" -OutFile $installer
+          $proc = Start-Process -FilePath $installer -ArgumentList "/silent /percomputer /vdd /norun" -Wait -PassThru
+          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "Parsec installer failed with exit code $($proc.ExitCode)." }
+          $parsecDir = "C:\ProgramData\Parsec"
+          New-Item -ItemType Directory -Path $parsecDir -Force | Out-Null
+          $userBin = [Convert]::FromBase64String($env:PARSEC_USER_BIN_B64)
+          [IO.File]::WriteAllBytes("$parsecDir\user.bin", $userBin)
+          @(
+            "app_host=1",
+            "host_name=GitHub_Windows_VM",
+            "server_max_clients=1",
+            "encoder_bitrate=15",
+            "network_server_start_port=8000"
+          ) | Set-Content -Path "$parsecDir\config.txt" -Encoding ascii
+          $service = Get-Service -Name "Parsec" -ErrorAction SilentlyContinue
+          if (-not $service) { $service = Get-Service | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object -First 1 }
+          if ($service) { Set-Service -Name $service.Name -StartupType Automatic; Start-Service -Name $service.Name -ErrorAction SilentlyContinue }
+          Start-Process -FilePath "C:\Program Files\Parsec\parsecd.exe" -ArgumentList "--service" -WindowStyle Hidden -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 10
+
       - name: 4. Verify Remote Access Services
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $rdp = Get-Service -Name TermService -ErrorAction Stop
           if ($rdp.Status -ne "Running") { throw "RDP service is not running." }
-          $rustdeskService = Get-Service | Where-Object { $_.Name -like "RustDesk*" -or $_.DisplayName -like "RustDesk*" } | Select-Object -First 1
-          if (-not $rustdeskService) { throw "RustDesk service is missing." }
-          if ($rustdeskService.Status -ne "Running") { throw "RustDesk service is not running." }
+          $parsec = Get-Service | Where-Object { $_.Name -like "*Parsec*" -or $_.DisplayName -like "*Parsec*" } | Select-Object -First 1
+          if (-not $parsec) { throw "Parsec service is missing." }
           Write-Host "RDP service: $($rdp.Status)"
-          Write-Host "RustDesk service: $($rustdeskService.Status)"
-      - name: 4A. RustDesk Network Diagnostics
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Continue"
-          $hostName = "rs-ny.rustdesk.com"
-          Write-Host "=== RustDesk Network Diagnostics ==="
-          Write-Host "Hostname: $hostName"
-          try {
-            $dns = Resolve-DnsName $hostName -ErrorAction Stop | Where-Object { $_.Type -eq "A" } | Select-Object -First 1
-            Write-Host "DNS: PASS ($($dns.IPAddress))"
-          } catch { Write-Host "DNS: FAIL ($($_.Exception.Message))" }
-          foreach ($port in @(21116,21117)) {
-            try {
-              $tcp = Test-NetConnection -ComputerName $hostName -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
-              if ($tcp) { Write-Host "TCP ${port}: PASS" } else { Write-Host "TCP ${port}: FAIL" }
-            } catch { Write-Host "TCP ${port}: ERROR ($($_.Exception.Message))" }
-          }
-          Write-Host "UDP 21116: testing with .NET UDP socket..."
-          try {
-            $udp = New-Object System.Net.Sockets.UdpClient
-            $udp.Client.ReceiveTimeout = 3000
-            $bytes = [Text.Encoding]::UTF8.GetBytes("rustdesk-diagnostic")
-            [void]$udp.Send($bytes,$bytes.Length,$hostName,21116)
-            Write-Host "UDP 21116: PACKET_SENT (UDP is connectionless; no reply is required)"
-            $udp.Close()
-          } catch { Write-Host "UDP 21116: ERROR ($($_.Exception.Message))" }
-          $rustdesk = "C:\Program Files\RustDesk\rustdesk.exe"
-          if (Test-Path $rustdesk) {
-            Write-Host "RustDesk executable: PASS"
-            $idFile = "$env:TEMP\rustdesk-diag-id.txt"
-            Remove-Item $idFile -Force -ErrorAction SilentlyContinue
-            Start-Process -FilePath $rustdesk -ArgumentList "--get-id" -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $idFile | Out-Null
-            $id = if (Test-Path $idFile) { (Get-Content $idFile -Raw).Trim() } else { "" }
-            if ($id) { Write-Host "RustDesk ID: $id" } else { Write-Host "RustDesk ID: FAIL" }
-          } else { Write-Host "RustDesk executable: FAIL" }
-          $service = Get-Service | Where-Object { $_.Name -like "RustDesk*" -or $_.DisplayName -like "RustDesk*" } | Select-Object -First 1
-          if ($service) { Write-Host "RustDesk service: $($service.Name) / $($service.Status)" } else { Write-Host "RustDesk service: FAIL" }
-          Write-Host "=== End RustDesk Network Diagnostics ==="
+          Write-Host "Parsec service: $($parsec.Name) / $($parsec.Status)"
+          if (-not (Test-Path "C:\ProgramData\Parsec\user.bin")) { throw "Parsec authentication file was not installed." }
+          if (-not (Test-Path "C:\ProgramData\Parsec\config.txt")) { throw "Parsec config was not installed." }
+          Write-Host "Parsec authentication file: PASS"
+          Write-Host "Parsec config: PASS"
+
       - name: 5. Clone YouTube Downloader Bot
         shell: powershell
         run: |
@@ -94,6 +83,7 @@ jobs:
           Set-Location $botPath
           Write-Host "Bot repository cloned."
           Write-Host "Commit: $(git rev-parse --short HEAD)"
+
       - name: 6. Bootstrap Windows Bot Environment
         shell: powershell
         working-directory: C:\youtube_downloader_bot
@@ -101,6 +91,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup_windows.ps1"
           if ($LASTEXITCODE -ne 0) { throw "Windows bootstrap failed." }
+
       - name: 7. Validate Bot Configuration
         shell: powershell
         working-directory: C:\youtube_downloader_bot
@@ -118,6 +109,7 @@ jobs:
           foreach ($name in $required) { $value = [Environment]::GetEnvironmentVariable($name); if ([string]::IsNullOrWhiteSpace($value)) { throw "Required bot environment variable is missing: $name" } }
           py -3.13 scripts\healthcheck.py
           if ($LASTEXITCODE -ne 0) { throw "Bot health check failed." }
+
       - name: 8. Start YouTube Downloader Bot
         shell: powershell
         working-directory: C:\youtube_downloader_bot
@@ -145,6 +137,7 @@ jobs:
           $process.Refresh()
           if ($process.HasExited) { if (Test-Path $stderr) { Get-Content $stderr -Tail 100 }; if (Test-Path $stdout) { Get-Content $stdout -Tail 100 }; throw "YouTube Downloader Bot stopped during startup." }
           Write-Host "Bot is running successfully. PID: $($process.Id)"
+
       - name: 9. Keep Windows VM Alive
         shell: powershell
         env:
@@ -166,7 +159,7 @@ jobs:
           if (-not (Test-Path $pidFile)) { throw "Bot PID file was not found." }
           $botPid = [int](Get-Content $pidFile)
           Write-Host "Windows VM is ready"
-          Write-Host "RustDesk is enabled (Tailscale is not used)"
+          Write-Host "Parsec is enabled"
           for ($minute = 0; $minute -lt 350; $minute += 5) {
               Start-Sleep -Seconds 300
               $process = Get-Process -Id $botPid -ErrorAction SilentlyContinue
@@ -185,6 +178,7 @@ jobs:
               }
               if (-not $restarted) { throw "Bot could not be kept running after 3 restart attempts." }
           }
+
       - name: 10. Cleanup
         if: always()
         shell: powershell
