@@ -60,8 +60,8 @@ jobs:
           foreach ($port in @(21116,21117)) {
             try {
               $tcp = Test-NetConnection -ComputerName $hostName -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
-              if ($tcp) { Write-Host "TCP $port: PASS" } else { Write-Host "TCP $port: FAIL" }
-            } catch { Write-Host "TCP $port: ERROR ($($_.Exception.Message))" }
+              if ($tcp) { Write-Host "TCP ${port}: PASS" } else { Write-Host "TCP ${port}: FAIL" }
+            } catch { Write-Host "TCP ${port}: ERROR ($($_.Exception.Message))" }
           }
           Write-Host "UDP 21116: testing with .NET UDP socket..."
           try {
